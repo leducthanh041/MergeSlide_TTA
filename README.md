@@ -30,13 +30,37 @@
 - tqdm=4.67.1
 - transformers=4.56.2
 
+## 1.1. Project Structure
+
+```
+MergeSlide_TTA/
+├── README.md
+├── task_prompts.pt
+├── train_random_sampling.py
+├── opcm_mergeslide.py
+├── test_classIL_task_prompt.py
+├── test_classIL_task_prompt_other_metrics.py
+├── test_taskIL.py
+├── mergeslide_tta/
+│   ├── __init__.py
+│   ├── datasets.py
+│   ├── prompts_zeroshot.py
+│   └── utils.py
+└── notebooks/
+    └── WSI_processing.ipynb
+```
+
+- Root-level scripts remain the CLI entrypoints.
+- Shared modules now live under `mergeslide_tta/`.
+- `task_prompts.pt` stays at the project root because it is an evaluation artifact.
+
 ## 2. Datasets
 
 ### 2.1. Access Datasets
 
 We use a stream of six datasets TCGA-BRCA, TCGA-NSCLC, TCGA-RCC, TCGA-ESCA, TCGA-TGCT and TCGA-CESC in this study.
 
-For dataset preparation, you may need to download the WSIs from the TCGA portal and process them (patch extraction + feature extraction using TITAN’s vision encoder). If you are not familiar with this procedure, please refer to `20251020_WSI_processing.ipynb`.
+For dataset preparation, you may need to download the WSIs from the TCGA portal and process them (patch extraction + feature extraction using TITAN’s vision encoder). If you are not familiar with this procedure, please refer to `notebooks/WSI_processing.ipynb`.
 
 For convenience, we also provide pre-processed features that can be used directly with the scripts below.
 
@@ -44,7 +68,7 @@ For convenience, we also provide pre-processed features that can be used directl
 
 ### 2.2. Data Preparation
 
-For dataset preparation, ESCA, TGCT, and CESC have a slightly different format compared with BRCA, NSCLC, and RCC. Therefore, two separate Python classes are defined for these groups. However, for both training and inference, we only need to prepare the data paths in `datasets.py` as follows (in `Sequential_Generic_MIL_Dataset` class):
+For dataset preparation, ESCA, TGCT, and CESC have a slightly different format compared with BRCA, NSCLC, and RCC. Therefore, two separate Python classes are defined for these groups. However, for both training and inference, we only need to prepare the data paths in `mergeslide_tta/datasets.py` as follows (in `Sequential_Generic_MIL_Dataset` class):
 
 ```[python3]
 datasets = [Generic_MIL_Dataset(csv_path='/path/to/dataset/wsi_dataset_annotation/tcga_brca/tcga_brca_subset.csv.zip', data_dir='/path/to/dataset/TCGA-BRCA_processed/features/', shuffle=False, seed=0, print_info=True, label_dict={'IDC': 0, 'ILC': 1}, patient_strat=False, ignore=['MDLC', 'PD', 'ACBC', 'IMMC', 'BRCNOS', 'BRCA', 'SPC', 'MBC', 'MPT']), 
@@ -72,7 +96,7 @@ As described in the paper, we first define class-aware prompts to describe a set
 
 ### 3.1. Class-aware Prompt Design
 
-For the six tasks in this study, please refer to `prompts_zeroshot.py`. You may design class-aware prompts for your new task by following the templates provided in that file.
+For the six tasks in this study, please refer to `mergeslide_tta/prompts_zeroshot.py`. You may design class-aware prompts for your new task by following the templates provided in that file.
 
 ### 3.2. Per-task Finetuning
 

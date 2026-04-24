@@ -15,12 +15,19 @@ from sklearn.metrics import balanced_accuracy_score
 from tqdm import tqdm
 from transformers import AutoModel
 
-from utils import bootstrap, get_eval_metrics, seed_torch
-from datasets import Sequential_Generic_MIL_Dataset
+from mergeslide_tta.utils import bootstrap, get_eval_metrics, seed_torch
+from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
 
 import sys
 import time
-from prompts_zeroshot import brca_prompts, rcc_prompts, nsclc_prompts, esca_prompts, tgct_prompts, cesc_prompts
+from mergeslide_tta.prompts_zeroshot import (
+    brca_prompts,
+    cesc_prompts,
+    esca_prompts,
+    nsclc_prompts,
+    rcc_prompts,
+    tgct_prompts,
+)
 device = 'cuda:0'
 titan_model = AutoModel.from_pretrained('MahmoodLab/TITAN', trust_remote_code=True)
 titan_model = titan_model.to(device)

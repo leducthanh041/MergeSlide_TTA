@@ -9,7 +9,12 @@ from transformers import AutoModel
 import argparse
 import sys
 
-from utils import get_task_vector_norm, is_leaf_module, svd, get_task_vector_state_dict
+from mergeslide_tta.utils import (
+    get_task_vector_norm,
+    get_task_vector_state_dict,
+    is_leaf_module,
+    svd,
+)
 import matplotlib.pyplot as plt
 import seaborn as sns
 

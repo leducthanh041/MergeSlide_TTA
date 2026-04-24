@@ -1,4 +1,5 @@
 import argparse
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -7,10 +8,19 @@ import torch.nn as nn
 from sklearn.metrics import balanced_accuracy_score, roc_auc_score, precision_score, recall_score, f1_score
 from tqdm import tqdm
 from transformers import AutoModel
-from utils import get_eval_metrics, seed_torch
-from datasets import Sequential_Generic_MIL_Dataset
 import time
-from prompts_zeroshot import brca_prompts, rcc_prompts, nsclc_prompts, esca_prompts, tgct_prompts, cesc_prompts
+from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
+from mergeslide_tta.prompts_zeroshot import (
+    brca_prompts,
+    cesc_prompts,
+    esca_prompts,
+    nsclc_prompts,
+    rcc_prompts,
+    tgct_prompts,
+)
+from mergeslide_tta.utils import get_eval_metrics, seed_torch
+
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 def pad_numpy_arrays(arrays, pad_value=0.0):
     """
@@ -285,7 +295,7 @@ if __name__ == "__main__":
     base_model = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)    
     base_model = base_model.to(device)
     overall_accs = []
-    task_prompts = torch.load("./task_prompts.pt")
+    task_prompts = torch.load(PROJECT_ROOT / "task_prompts.pt")
 
     overall_accs = []
     overall_baccs = []
