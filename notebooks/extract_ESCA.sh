@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=ESCA
-#SBATCH --output=/datastore/uittogether2/LuuTru/Thanhld/WSI/MergeSlide_TTA/notebooks/log/ESCA_%j.out
-#SBATCH --error=/datastore/uittogether2/LuuTru/Thanhld/WSI/MergeSlide_TTA/notebooks/log/ESCA_%j.err
+#SBATCH --output=/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/notebooks/log/ESCA_%j.out
+#SBATCH --error=/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/notebooks/log/ESCA_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
@@ -13,16 +13,16 @@ set -euo pipefail
 
 REQUIRED_VRAM=15000
 
-PROJECT_ROOT="/datastore/uittogether2/LuuTru/Thanhld/WSI/MergeSlide_TTA/notebooks"
+PROJECT_ROOT="/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/notebooks"
 PREPATH_ROOT="${PROJECT_ROOT}/PrePATH"
-PYTHON_BIN="/datastore/uittogether2/tools/miniconda3/envs/mergePre/bin/python"
-CONDA_SH="/datastore/uittogether2/tools/miniconda3/etc/profile.d/conda.sh"
-CONDA_ENV="/datastore/uittogether2/tools/miniconda3/envs/mergePre"
+PYTHON_BIN="/datastore/uittogether3/tools/miniconda3/envs/mergePre/bin/python"
+CONDA_SH="/datastore/uittogether3/tools/miniconda3/etc/profile.d/conda.sh"
+CONDA_ENV="/datastore/uittogether3/tools/miniconda3/envs/mergePre"
 
 # Notebook section 1/2/3 translated to batch-friendly variables for TCGA-ESCA.
 DATASET_NAME="TCGA-ESCA"
 TASK_NAME="TCGA-ESCA_feats_conch15"
-WSI_SOURCE_ROOT="/datastore/uittogether2/LuuTru/Thanhld/WSI/dataset/TCGA-ESCA"
+WSI_SOURCE_ROOT="/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/TCGA-ESCA"
 WSI_FORMAT="svs"
 PATCH_LEVEL=1
 PRESET_NAME="tcga.csv"
