@@ -549,14 +549,14 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
     N_CLASSES_PER_TASK = 2
     N_TASKS = 6
     TRANSFORM = None
-    datasets = [Generic_MIL_Dataset(csv_path='/home/bui/datasets/wsi_dataset_annotation/tcga_brca/tcga_brca_subset.csv.zip', data_dir='/home/bui/datasets/TCGA-BRCA_processed/features/', shuffle=False, seed=0, print_info=True, label_dict={'IDC': 0, 'ILC': 1}, patient_strat=False, ignore=['MDLC', 'PD', 'ACBC', 'IMMC', 'BRCNOS', 'BRCA', 'SPC', 'MBC', 'MPT']), 
-                Generic_MIL_Dataset(csv_path='/home/bui/datasets/wsi_dataset_annotation/tcga_rcc/tcga_kidney_subset.csv.zip', data_dir='/home/bui/datasets/TCGA-RCC_processed/features/', shuffle=False, seed=0, print_info=True, label_dict={'CCRCC': 0, 'PRCC': 1, 'CHRCC': 2}, patient_strat=False, ignore=[]), 
-                Generic_MIL_Dataset(csv_path='/home/bui/datasets/wsi_dataset_annotation/tcga_nsclc/tcga_lung_subset.csv.zip', data_dir='/home/bui/datasets/TCGA-NSCLC_processed/features/', shuffle=False, seed=0, print_info=True, label_dict={'LUAD': 0, 'LUSC': 1}, patient_strat=False, ignore=[]), 
-                Generic_MIL_Dataset2(data_dir='/home/bui/datasets/TCGA-ESCA_processed/features/', label_dict={0: 0, 1: 1}), 
-                Generic_MIL_Dataset2(data_dir='/home/bui/datasets/TCGA-TGCT_processed/features/', label_dict={0: 0, 1: 1}), 
-                Generic_MIL_Dataset2(data_dir='/home/bui/datasets/TCGA-CESC_processed/features/', label_dict={0: 0, 1: 1})]
+    datasets = [Generic_MIL_Dataset(csv_path='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_brca/tcga_brca_subset.csv', data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-BRCA_processed/features/', shuffle=False, seed=0, print_info=True, label_dict={'IDC': 0, 'ILC': 1}, patient_strat=False, ignore=['MDLC', 'PD', 'ACBC', 'IMMC', 'BRCNOS', 'BRCA', 'SPC', 'MBC', 'MPT']), 
+                Generic_MIL_Dataset(csv_path='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_rcc/tcga_kidney_subset.csv', data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-RCC_processed/features/', shuffle=False, seed=0, print_info=True, label_dict={'CCRCC': 0, 'PRCC': 1, 'CHRCC': 2}, patient_strat=False, ignore=[]), 
+                Generic_MIL_Dataset(csv_path='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_nsclc/tcga_lung_subset.csv', data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-NSCLC_processed/features/', shuffle=False, seed=0, print_info=True, label_dict={'LUAD': 0, 'LUSC': 1}, patient_strat=False, ignore=[]), 
+                Generic_MIL_Dataset2(data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-ESCA_processed/features/', label_dict={0: 0, 1: 1}), 
+                Generic_MIL_Dataset2(data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-TGCT_processed/features/', label_dict={0: 0, 1: 1}), 
+                Generic_MIL_Dataset2(data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-CESC_processed/features/', label_dict={0: 0, 1: 1})]
     
-    split_dirs = ['/home/bui/datasets/wsi_dataset_annotation/tcga_brca', '/home/bui/datasets/wsi_dataset_annotation/tcga_rcc', '/home/bui/datasets/wsi_dataset_annotation/tcga_nsclc', '/home/bui/datasets/wsi_dataset_annotation/tcga_esca', '/home/bui/datasets/wsi_dataset_annotation/tcga_tgct', '/home/bui/datasets/wsi_dataset_annotation/tcga_cesc']
+    split_dirs = ['/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_brca', '/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_rcc', '/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_nsclc', '/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_esca', '/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_tgct', '/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_cesc']
 
     def get_data_loaders(self, FOLD, task_id):
         dataset = self.datasets[task_id]
