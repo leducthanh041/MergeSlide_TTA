@@ -87,6 +87,5 @@ export CUDA_VISIBLE_DEVICES="${BEST_GPU}"
 
 # ================= RUN =================
 echo "[INFO] launching training at $(date)"
-export HF_TOKEN="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"
 
 python -u TRIDENT/run_batch_of_slides.py --task all --wsi_dir /datastore/uittogether2/LuuTru/Thanhld/WSI/dataset/TCGA-TGCT/ --job_dir /datastore/uittogether2/LuuTru/Thanhld/WSI/dataset/TCGA-TGCT/preprocessed/ --patch_encoder conch_v15 --mag 10 --patch_size 256
