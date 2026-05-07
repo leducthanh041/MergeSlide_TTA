@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=ESCA
-#SBATCH --output=/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/notebooks/log/ESCA_%j.out
-#SBATCH --error=/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/notebooks/log/ESCA_%j.err
+#SBATCH --job-name=NSCLC
+#SBATCH --output=/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/notebooks/log/NSCLC_%j.out
+#SBATCH --error=/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/notebooks/log/NSCLC_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=16G
-#SBATCH --gres=mps:2
+#SBATCH --gres=mps:l40:2
 #SBATCH --time=48:00:00
 
 set -euo pipefail
@@ -19,10 +19,10 @@ PYTHON_BIN="/datastore/uittogether3/tools/miniconda3/envs/mergePre/bin/python"
 CONDA_SH="/datastore/uittogether3/tools/miniconda3/etc/profile.d/conda.sh"
 CONDA_ENV="/datastore/uittogether3/tools/miniconda3/envs/mergePre"
 
-# Notebook section 1/2/3 translated to batch-friendly variables for TCGA-ESCA.
-DATASET_NAME="TCGA-ESCA"
-TASK_NAME="TCGA-ESCA_feats_conch15"
-WSI_SOURCE_ROOT="/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/TCGA-ESCA"
+# Notebook section 1/2/3 translated to batch-friendly variables for TCGA-NSCLC.
+DATASET_NAME="TCGA-NSCLC"
+TASK_NAME="TCGA-NSCLC_feats_conch15"
+WSI_SOURCE_ROOT="/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/TCGA-NSCLC"
 WSI_FORMAT="svs"
 PATCH_LEVEL=1
 PRESET_NAME="tcga.csv"
@@ -30,7 +30,7 @@ EXTRACT_MODEL="conch15"
 EXTRACT_BATCH_SIZE=32
 
 DOWNLOADED_ROOT="${PREPATH_ROOT}/downloaded_data/${DATASET_NAME}"
-PATCH_ROOT="${DOWNLOADED_ROOT}/TCGA-ESCA_patches"
+PATCH_ROOT="${DOWNLOADED_ROOT}/TCGA-NSCLC_patches"
 PATCH_H5_DIR="${PATCH_ROOT}/patches"
 MASK_DIR="${PATCH_ROOT}/masks"
 STITCH_DIR="${PATCH_ROOT}/stitches"
@@ -90,7 +90,7 @@ conda activate "${CONDA_ENV}"
 set -u
 
 [ -d "${PREPATH_ROOT}" ] || fail "Missing PrePATH directory: ${PREPATH_ROOT}"
-[ -d "${WSI_SOURCE_ROOT}" ] || fail "Missing TCGA-ESCA WSI source: ${WSI_SOURCE_ROOT}"
+[ -d "${WSI_SOURCE_ROOT}" ] || fail "Missing TCGA-NSCLC WSI source: ${WSI_SOURCE_ROOT}"
 [ -f "${PRESET_PATH}" ] || fail "Missing preset file: ${PRESET_PATH}"
 [ -f "${CKPT_PATH}" ] || fail "Missing existing CONCH checkpoint: ${CKPT_PATH}"
 
