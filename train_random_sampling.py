@@ -28,7 +28,7 @@ from mergeslide_tta.prompts_zeroshot import (
     rcc_prompts,
     tgct_prompts,
 )
-device = 'cuda:7'
+device = 'cuda'
 titan_model = AutoModel.from_pretrained('MahmoodLab/TITAN', trust_remote_code=True)
 titan_model = titan_model.to(device)
 
