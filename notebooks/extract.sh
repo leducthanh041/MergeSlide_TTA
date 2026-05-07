@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=TGCT
-#SBATCH --output=/datastore/uittogether2/LuuTru/Thanhld/WSI/MergeSlide_TTA/notebooks/log/TGCT_%j.out
-#SBATCH --error=/datastore/uittogether2/LuuTru/Thanhld/WSI/MergeSlide_TTA/notebooks/log/TGCT_%j.err
+#SBATCH --job-name=RCC
+#SBATCH --output=/datastore/uittogether2/LuuTru/Thanhld/WSI/MergeSlide_TTA/notebooks/log/RCC_%j.out
+#SBATCH --error=/datastore/uittogether2/LuuTru/Thanhld/WSI/MergeSlide_TTA/notebooks/log/RCC_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
@@ -19,10 +19,10 @@ PYTHON_BIN="/datastore/uittogether2/tools/miniconda3/envs/mergePre/bin/python"
 CONDA_SH="/datastore/uittogether2/tools/miniconda3/etc/profile.d/conda.sh"
 CONDA_ENV="/datastore/uittogether2/tools/miniconda3/envs/mergePre"
 
-# Notebook section 1/2/3 translated to batch-friendly variables for TCGA-TGCT.
-DATASET_NAME="TCGA-TGCT"
-TASK_NAME="TCGA-TGCT_feats_conch15"
-WSI_SOURCE_ROOT="/datastore/uittogether2/LuuTru/Thanhld/WSI/dataset/TCGA-TGCT"
+# Notebook section 1/2/3 translated to batch-friendly variables for TCGA-RCC.
+DATASET_NAME="TCGA-RCC"
+TASK_NAME="TCGA-RCC_feats_conch15"
+WSI_SOURCE_ROOT="/datastore/uittogether2/LuuTru/Thanhld/WSI/dataset/TCGA-RCC"
 WSI_FORMAT="svs"
 PATCH_LEVEL=1
 PRESET_NAME="tcga.csv"
@@ -30,7 +30,7 @@ EXTRACT_MODEL="conch15"
 EXTRACT_BATCH_SIZE=32
 
 DOWNLOADED_ROOT="${PREPATH_ROOT}/downloaded_data/${DATASET_NAME}"
-PATCH_ROOT="${DOWNLOADED_ROOT}/TCGA-TGCT_patches"
+PATCH_ROOT="${DOWNLOADED_ROOT}/TCGA-RCC_patches"
 PATCH_H5_DIR="${PATCH_ROOT}/patches"
 MASK_DIR="${PATCH_ROOT}/masks"
 STITCH_DIR="${PATCH_ROOT}/stitches"
@@ -90,7 +90,7 @@ conda activate "${CONDA_ENV}"
 set -u
 
 [ -d "${PREPATH_ROOT}" ] || fail "Missing PrePATH directory: ${PREPATH_ROOT}"
-[ -d "${WSI_SOURCE_ROOT}" ] || fail "Missing TCGA-TGCT WSI source: ${WSI_SOURCE_ROOT}"
+[ -d "${WSI_SOURCE_ROOT}" ] || fail "Missing TCGA-RCC WSI source: ${WSI_SOURCE_ROOT}"
 [ -f "${PRESET_PATH}" ] || fail "Missing preset file: ${PRESET_PATH}"
 [ -f "${CKPT_PATH}" ] || fail "Missing existing CONCH checkpoint: ${CKPT_PATH}"
 
