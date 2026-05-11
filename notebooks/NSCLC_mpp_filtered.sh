@@ -5,13 +5,13 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
-#SBATCH --mem=8G
-#SBATCH --gres=mps:l40:2
+#SBATCH --mem=16G
+#SBATCH --gres=mps:a100:2
 #SBATCH --time=48:00:00
 
 set -euo pipefail
 
-REQUIRED_VRAM="${REQUIRED_VRAM:-15000}"
+REQUIRED_VRAM="${REQUIRED_VRAM:-20000}"
 PROJECT_ROOT="/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/notebooks"
 CONDA_SH="/datastore/uittogether3/tools/miniconda3/etc/profile.d/conda.sh"
 CONDA_ENV="/datastore/uittogether3/tools/miniconda3/envs/trident"
