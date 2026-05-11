@@ -427,7 +427,7 @@ class Generic_MIL_Dataset(Generic_WSI_Classification_Dataset):
         slide_id = self.slide_data['slide_id'][idx]
         label = self.slide_data['label'][idx]
         data_dir = self.data_dir
-        full_path = os.path.join(data_dir, 'h5_files', '{}.h5'.format(slide_id.split('.svs')[0]))
+        full_path = os.path.join(data_dir, '{}.h5'.format(slide_id.split('.svs')[0]))
         with h5py.File(full_path, 'r') as hdf5_file:
             try:
                 features = hdf5_file['features'][:]
@@ -480,7 +480,7 @@ class Generic_MIL_Dataset2_Split:
         slide_id = self.data[idx]
         label = self.label[idx]
         data_dir = self.data_dir
-        full_path = os.path.join(data_dir, 'h5_files', '{}.h5'.format(slide_id))
+        full_path = os.path.join(data_dir, '{}.h5'.format(slide_id))
         with h5py.File(full_path, 'r') as hdf5_file:
             features = hdf5_file['features'][:]
             coords = hdf5_file['coords'][:]
@@ -549,14 +549,14 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
     N_CLASSES_PER_TASK = 2
     N_TASKS = 6
     TRANSFORM = None
-    datasets = [Generic_MIL_Dataset(csv_path='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_brca/tcga_brca_subset.csv', data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-BRCA_processed/features/', shuffle=False, seed=0, print_info=True, label_dict={'IDC': 0, 'ILC': 1}, patient_strat=False, ignore=['MDLC', 'PD', 'ACBC', 'IMMC', 'BRCNOS', 'BRCA', 'SPC', 'MBC', 'MPT']), 
-                Generic_MIL_Dataset(csv_path='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_rcc/tcga_kidney_subset.csv', data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-RCC_processed/features/', shuffle=False, seed=0, print_info=True, label_dict={'CCRCC': 0, 'PRCC': 1, 'CHRCC': 2}, patient_strat=False, ignore=[]), 
-                Generic_MIL_Dataset(csv_path='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_nsclc/tcga_lung_subset.csv', data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-NSCLC_processed/features/', shuffle=False, seed=0, print_info=True, label_dict={'LUAD': 0, 'LUSC': 1}, patient_strat=False, ignore=[]), 
-                Generic_MIL_Dataset2(data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-ESCA_processed/features/', label_dict={0: 0, 1: 1}), 
-                Generic_MIL_Dataset2(data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-TGCT_processed/features/', label_dict={0: 0, 1: 1}), 
-                Generic_MIL_Dataset2(data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-CESC_processed/features/', label_dict={0: 0, 1: 1})]
+    datasets = [Generic_MIL_Dataset(csv_path='/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_brca/tcga_brca_subset.csv', data_dir='/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/TCGA-BRCA/preprocessed/10x_256px_0px_overlap/features_conch_v15/', shuffle=False, seed=0, print_info=True, label_dict={'IDC': 0, 'ILC': 1}, patient_strat=False, ignore=['MDLC', 'PD', 'ACBC', 'IMMC', 'BRCNOS', 'BRCA', 'SPC', 'MBC', 'MPT']), 
+                Generic_MIL_Dataset(csv_path='/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_rcc/tcga_kidney_subset.csv', data_dir='/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/TCGA-RCC/preprocessed/10x_256px_0px_overlap/features_conch_v15/', shuffle=False, seed=0, print_info=True, label_dict={'CCRCC': 0, 'PRCC': 1, 'CHRCC': 2}, patient_strat=False, ignore=[]), 
+                Generic_MIL_Dataset(csv_path='/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_nsclc/tcga_lung_subset.csv', data_dir='/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/TCGA-NSCLC/preprocessed/10x_256px_0px_overlap/features_conch_v15/', shuffle=False, seed=0, print_info=True, label_dict={'LUAD': 0, 'LUSC': 1}, patient_strat=False, ignore=[]), 
+                Generic_MIL_Dataset2(data_dir='/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/TCGA-ESCA/preprocessed/10x_256px_0px_overlap/features_conch_v15/', label_dict={0: 0, 1: 1}), 
+                Generic_MIL_Dataset2(data_dir='/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/TCGA-TGCT/preprocessed/10x_256px_0px_overlap/features_conch_v15/', label_dict={0: 0, 1: 1}), 
+                Generic_MIL_Dataset2(data_dir='/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/TCGA-CESC/preprocessed/10x_256px_0px_overlap/features_conch_v15/', label_dict={0: 0, 1: 1})]
     
-    split_dirs = ['/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_brca', '/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_rcc', '/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_nsclc', '/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_esca', '/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_tgct', '/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_cesc']
+    split_dirs = ['/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_brca', '/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_rcc', '/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_nsclc', '/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_esca', '/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_tgct', '/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_cesc']
 
     def get_data_loaders(self, FOLD, task_id):
         dataset = self.datasets[task_id]
@@ -594,5 +594,5 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
 if __name__ == '__main__':
     seq_dataset = Sequential_Generic_MIL_Dataset()
     fold = 0
-    task_id = 0
+    task_id = 2
     trains, vals, tests = seq_dataset.get_data_loaders(fold, task_id)
