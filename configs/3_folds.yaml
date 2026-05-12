@@ -6,29 +6,29 @@ dataset:
 
   brca:
     csv: "${dataset.root}/wsi_dataset_annotation/tcga_brca/tcga_brca_subset.csv"
-    features: "${dataset.root}/TCGA-BRCA_processed/features/"
+    features: "${dataset.root}/TCGA-BRCA/preprocessed/10x_256px_0px_overlap/features_conch_v15/"
     splits: "${dataset.root}/wsi_dataset_annotation/tcga_brca"
 
   rcc:
     csv: "${dataset.root}/wsi_dataset_annotation/tcga_rcc/tcga_kidney_subset.csv"
-    features: "${dataset.root}/TCGA-RCC_processed/features/"
+    features: "${dataset.root}/TCGA-RCC/preprocessed/10x_256px_0px_overlap/features_conch_v15/"
     splits: "${dataset.root}/wsi_dataset_annotation/tcga_rcc"
 
   nsclc:
     csv: "${dataset.root}/wsi_dataset_annotation/tcga_nsclc/tcga_lung_subset.csv"
-    features: "${dataset.root}/TCGA-NSCLC_processed/features/"
+    features: "${dataset.root}/TCGA-NSCLC/preprocessed/10x_256px_0px_overlap/features_conch_v15/"
     splits: "${dataset.root}/wsi_dataset_annotation/tcga_nsclc"
 
   esca:
-    features: "${dataset.root}/TCGA-ESCA_processed/features/"
+    features: "${dataset.root}/TCGA-ESCA/preprocessed/10x_256px_0px_overlap/features_conch_v15/"
     splits: "${dataset.root}/wsi_dataset_annotation/tcga_esca"
 
   tgct:
-    features: "${dataset.root}/TCGA-TGCT_processed/features/"
+    features: "${dataset.root}/TCGA-TGCT/preprocessed/10x_256px_0px_overlap/features_conch_v15/"
     splits: "${dataset.root}/wsi_dataset_annotation/tcga_tgct"
 
   cesc:
-    features: "${dataset.root}/TCGA-CESC_processed/features/"
+    features: "${dataset.root}/TCGA-CESC/preprocessed/10x_256px_0px_overlap/features_conch_v15/"
     splits: "${dataset.root}/wsi_dataset_annotation/tcga_cesc"
 
 training:
@@ -38,7 +38,7 @@ training:
   batch_size: 1
   num_workers: 40
   seed: 0
-  num_folds: 10
+  num_folds: 3
 
 dataloader:
   batch_size: 1       # MIL cố định batch=1 (mỗi WSI là 1 bag có kích thước khác nhau)

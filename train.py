@@ -21,6 +21,48 @@ from mergeslide_tta.model import build_model, build_prompt_classifier, cosine_lr
 from mergeslide_tta.utils import seed_torch
 
 
+def format_bytes(num_bytes: int) -> str:
+    """Format bytes as GiB for readable GPU memory logs."""
+    return f"{num_bytes / (1024 ** 3):.2f} GiB"
+
+
+def require_cuda_device() -> torch.device:
+    """Require CUDA and return the active PyTorch CUDA device."""
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA is not available. Refusing to run training on CPU. "
+            "Check Slurm GPU allocation, CUDA_VISIBLE_DEVICES, driver, and PyTorch CUDA build."
+        )
+
+    device = torch.device("cuda:0")
+    torch.cuda.set_device(device)
+    return device
+
+
+def print_gpu_vram(prefix: str, device: torch.device) -> None:
+    """Print current GPU identity and VRAM usage."""
+    device_idx = torch.cuda.current_device()
+    props = torch.cuda.get_device_properties(device_idx)
+    free_bytes, total_bytes = torch.cuda.mem_get_info(device_idx)
+    allocated = torch.cuda.memory_allocated(device_idx)
+    reserved = torch.cuda.memory_reserved(device_idx)
+    used_by_context = total_bytes - free_bytes
+
+    print(
+        f"[GPU][{prefix}] "
+        f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')} | "
+        f"torch_device={device} | "
+        f"visible_gpus={torch.cuda.device_count()} | "
+        f"current_device={device_idx} | "
+        f"name={props.name} | "
+        f"total={format_bytes(total_bytes)} | "
+        f"free={format_bytes(free_bytes)} | "
+        f"used_context={format_bytes(used_by_context)} | "
+        f"allocated={format_bytes(allocated)} | "
+        f"reserved={format_bytes(reserved)}"
+    )
+
+
 def train_one_task(
     train_loader, val_loader, model: nn.Module,
     num_epochs: int, lr: float, weight_decay: float, device: str,
@@ -127,7 +169,8 @@ if __name__ == "__main__":
     args = parser.parse_args()  # ← parse ONCE, outside fold loop
 
     cfg    = OmegaConf.load(args.config)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = require_cuda_device()
+    print_gpu_vram("startup", device)
     seed_torch(device, cfg.training.seed)
 
     save_dir = args.save_dir or cfg.paths.finetuned_checkpoints
@@ -135,6 +178,7 @@ if __name__ == "__main__":
     # Build prompt classifier ONCE (expensive — loads TITAN text encoder)
     print("Building prompt classifier ...")
     classifier, _ = build_prompt_classifier(str(device))
+    print_gpu_vram("after_prompt_classifier", device)
 
     seq_dataset = Sequential_Generic_MIL_Dataset(cfg)
 
@@ -143,6 +187,7 @@ if __name__ == "__main__":
 
         for task_id in range(NUM_TASKS):   # ← FIX: range(NUM_TASKS) không phải range(3)
             print(f"\n--- Task {task_id} ({['BRCA','RCC','NSCLC','ESCA','TGCT','CESC'][task_id]}) ---")
+            print_gpu_vram(f"before_task_{task_id}", device)
             train_loader, val_loader, _ = seq_dataset.get_data_loaders(fold_id, task_id)
 
             model = build_model(
@@ -152,6 +197,7 @@ if __name__ == "__main__":
                 task_class_ranges=TASK_CLASS_RANGES,
                 device=str(device),
             )
+            print_gpu_vram(f"after_build_model_task_{task_id}", device)
 
             t0 = time.time()
             model = train_one_task(
@@ -169,3 +215,4 @@ if __name__ == "__main__":
 
             del model
             torch.cuda.empty_cache()
+            print_gpu_vram(f"after_cleanup_task_{task_id}", device)

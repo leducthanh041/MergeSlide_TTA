@@ -427,7 +427,7 @@ class Generic_MIL_Dataset(Generic_WSI_Classification_Dataset):
         slide_id = self.slide_data['slide_id'][idx]
         label = self.slide_data['label'][idx]
         data_dir = self.data_dir
-        full_path = os.path.join(data_dir, '{}.h5'.format(slide_id.split('.svs')[0]))
+        full_path = os.path.join(data_dir, 'h5_files', '{}.h5'.format(slide_id.split('.svs')[0]))
         with h5py.File(full_path, 'r') as hdf5_file:
             try:
                 features = hdf5_file['features'][:]
@@ -480,7 +480,7 @@ class Generic_MIL_Dataset2_Split:
         slide_id = self.data[idx]
         label = self.label[idx]
         data_dir = self.data_dir
-        full_path = os.path.join(data_dir, '{}.h5'.format(slide_id))
+        full_path = os.path.join(data_dir, 'h5_files','{}.h5'.format(slide_id))
         with h5py.File(full_path, 'r') as hdf5_file:
             features = hdf5_file['features'][:]
             coords = hdf5_file['coords'][:]

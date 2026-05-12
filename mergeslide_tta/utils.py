@@ -1,16 +1,19 @@
 import os
 import random
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional, Union
-
+from typing import Any, Dict, List, Optional, Tuple, Union
+import torch
+from torch import Tensor
+from torch import nn
 import numpy as np
 import pandas as pd
-import torch
 from sklearn.metrics import (accuracy_score, balanced_accuracy_score,
                              classification_report, cohen_kappa_score,
                              log_loss, roc_auc_score)
 from tqdm import tqdm
 import copy
+
+StateDictType = Dict[str, torch.Tensor]
 
 # zeroshot prompt templates
 TEMPLATES = [
