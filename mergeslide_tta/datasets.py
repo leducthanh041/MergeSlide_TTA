@@ -480,7 +480,7 @@ class Generic_MIL_Dataset2_Split:
         slide_id = self.data[idx]
         label = self.label[idx]
         data_dir = self.data_dir
-        full_path = os.path.join(data_dir, 'h5_files', '{}.h5'.format(slide_id))
+        full_path = os.path.join(data_dir, 'h5_files','{}.h5'.format(slide_id))
         with h5py.File(full_path, 'r') as hdf5_file:
             features = hdf5_file['features'][:]
             coords = hdf5_file['coords'][:]
@@ -544,53 +544,197 @@ class ConcatDataset(Dataset):
         return self.datasets[dataset_idx][sample_idx]
 
 class Sequential_Generic_MIL_Dataset(ContinualDataset):
-    NAME = 'seq-wsi'
-    SETTING = 'class-il'
+    """
+    Sequential MIL dataset wrapper cho 6 TCGA tasks.
+
+    Thứ tự task cố định:
+        0: BRCA  (IDC / ILC)
+        1: RCC   (CCRCC / PRCC / CHRCC)
+        2: NSCLC (LUAD / LUSC)
+        3: ESCA  (class 0 / class 1)
+        4: TGCT  (class 0 / class 1)
+        5: CESC  (class 0 / class 1)
+
+    Args:
+        cfg: OmegaConf DictConfig từ configs/default.yaml.
+             Nếu None, dùng lại path + dataloader config hardcode (backward compat).
+    """
+
+    NAME = "seq-wsi"
+    SETTING = "class-il"
     N_CLASSES_PER_TASK = 2
     N_TASKS = 6
     TRANSFORM = None
-    datasets = [Generic_MIL_Dataset(csv_path='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_brca/tcga_brca_subset.csv', data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-BRCA_processed/features/', shuffle=False, seed=0, print_info=True, label_dict={'IDC': 0, 'ILC': 1}, patient_strat=False, ignore=['MDLC', 'PD', 'ACBC', 'IMMC', 'BRCNOS', 'BRCA', 'SPC', 'MBC', 'MPT']), 
-                Generic_MIL_Dataset(csv_path='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_rcc/tcga_kidney_subset.csv', data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-RCC_processed/features/', shuffle=False, seed=0, print_info=True, label_dict={'CCRCC': 0, 'PRCC': 1, 'CHRCC': 2}, patient_strat=False, ignore=[]), 
-                Generic_MIL_Dataset(csv_path='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_nsclc/tcga_lung_subset.csv', data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-NSCLC_processed/features/', shuffle=False, seed=0, print_info=True, label_dict={'LUAD': 0, 'LUSC': 1}, patient_strat=False, ignore=[]), 
-                Generic_MIL_Dataset2(data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-ESCA_processed/features/', label_dict={0: 0, 1: 1}), 
-                Generic_MIL_Dataset2(data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-TGCT_processed/features/', label_dict={0: 0, 1: 1}), 
-                Generic_MIL_Dataset2(data_dir='/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/TCGA-CESC_processed/features/', label_dict={0: 0, 1: 1})]
-    
-    split_dirs = ['/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_brca', '/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_rcc', '/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_nsclc', '/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_esca', '/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_tgct', '/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset/wsi_dataset_annotation/tcga_cesc']
 
-    def get_data_loaders(self, FOLD, task_id):
-        dataset = self.datasets[task_id]
-        train_dataset, val_dataset, test_dataset = dataset.return_splits(from_id=False, csv_path='{}/splits_{}.csv'.format(self.split_dirs[task_id], FOLD))
-        train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, num_workers=4, collate_fn=collate_MIL)
-        val_loader = DataLoader(val_dataset, batch_size=1, shuffle=True, num_workers=4, collate_fn=collate_MIL)
-        test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=4, collate_fn=collate_MIL)
+    _BRCA_LABEL_DICT  = {"IDC": 0, "ILC": 1}
+    _BRCA_IGNORE      = ["MDLC", "PD", "ACBC", "IMMC", "BRCNOS",
+                          "BRCA", "SPC", "MBC", "MPT"]
+    _RCC_LABEL_DICT   = {"CCRCC": 0, "PRCC": 1, "CHRCC": 2}
+    _NSCLC_LABEL_DICT = {"LUAD": 0, "LUSC": 1}
+
+    def __init__(self, cfg=None):
+        super().__init__()
+
+        if cfg is not None:
+            self._init_from_config(cfg)
+            # Lấy dataloader config từ yaml
+            self.batch_size  = cfg.dataloader.batch_size
+            self.num_workers = cfg.dataloader.num_workers
+        else:
+            self._init_hardcoded()
+            # Fallback về giá trị gốc
+            self.batch_size  = 1
+            self.num_workers = 4
+
+    # ------------------------------------------------------------------
+    # Khởi tạo từ config
+    # ------------------------------------------------------------------
+
+    def _init_from_config(self, cfg):
+        d = cfg.dataset
+        self.datasets = [
+            Generic_MIL_Dataset(
+                csv_path=d.brca.csv,
+                data_dir=d.brca.features,
+                shuffle=False, seed=0, print_info=True,
+                label_dict=self._BRCA_LABEL_DICT,
+                patient_strat=False,
+                ignore=self._BRCA_IGNORE,
+            ),
+            Generic_MIL_Dataset(
+                csv_path=d.rcc.csv,
+                data_dir=d.rcc.features,
+                shuffle=False, seed=0, print_info=True,
+                label_dict=self._RCC_LABEL_DICT,
+                patient_strat=False, ignore=[],
+            ),
+            Generic_MIL_Dataset(
+                csv_path=d.nsclc.csv,
+                data_dir=d.nsclc.features,
+                shuffle=False, seed=0, print_info=True,
+                label_dict=self._NSCLC_LABEL_DICT,
+                patient_strat=False, ignore=[],
+            ),
+            Generic_MIL_Dataset2(data_dir=d.esca.features, label_dict={0: 0, 1: 1}),
+            Generic_MIL_Dataset2(data_dir=d.tgct.features, label_dict={0: 0, 1: 1}),
+            Generic_MIL_Dataset2(data_dir=d.cesc.features, label_dict={0: 0, 1: 1}),
+        ]
+        self.split_dirs = [
+            d.brca.splits,
+            d.rcc.splits,
+            d.nsclc.splits,
+            d.esca.splits,
+            d.tgct.splits,
+            d.cesc.splits,
+        ]
+
+    # ------------------------------------------------------------------
+    # Backward-compat fallback
+    # ------------------------------------------------------------------
+
+    def _init_hardcoded(self):
+        ROOT = "/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset"
+        ANN  = f"{ROOT}/wsi_dataset_annotation"
+        PRE  = "preprocessed/10x_256px_0px_overlap/features_conch_v15"
+
+        self.datasets = [
+            Generic_MIL_Dataset(
+                csv_path=f"{ANN}/tcga_brca/tcga_brca_subset.csv",
+                data_dir=f"{ROOT}/TCGA-BRCA/{PRE}/",
+                shuffle=False, seed=0, print_info=True,
+                label_dict=self._BRCA_LABEL_DICT,
+                patient_strat=False,
+                ignore=self._BRCA_IGNORE,
+            ),
+            Generic_MIL_Dataset(
+                csv_path=f"{ANN}/tcga_rcc/tcga_kidney_subset.csv",
+                data_dir=f"{ROOT}/TCGA-RCC/{PRE}/",
+                shuffle=False, seed=0, print_info=True,
+                label_dict=self._RCC_LABEL_DICT,
+                patient_strat=False, ignore=[],
+            ),
+            Generic_MIL_Dataset(
+                csv_path=f"{ANN}/tcga_nsclc/tcga_lung_subset.csv",
+                data_dir=f"{ROOT}/TCGA-NSCLC/{PRE}/",
+                shuffle=False, seed=0, print_info=True,
+                label_dict=self._NSCLC_LABEL_DICT,
+                patient_strat=False, ignore=[],
+            ),
+            Generic_MIL_Dataset2(data_dir=f"{ROOT}/TCGA-ESCA/{PRE}/",  label_dict={0: 0, 1: 1}),
+            Generic_MIL_Dataset2(data_dir=f"{ROOT}/TCGA-TGCT/{PRE}/",  label_dict={0: 0, 1: 1}),
+            Generic_MIL_Dataset2(data_dir=f"{ROOT}/TCGA-CESC/{PRE}/",  label_dict={0: 0, 1: 1}),
+        ]
+        self.split_dirs = [
+            f"{ANN}/tcga_brca",
+            f"{ANN}/tcga_rcc",
+            f"{ANN}/tcga_nsclc",
+            f"{ANN}/tcga_esca",
+            f"{ANN}/tcga_tgct",
+            f"{ANN}/tcga_cesc",
+        ]
+
+    # ------------------------------------------------------------------
+    # DataLoader helpers
+    # ------------------------------------------------------------------
+
+    def _split_csv(self, task_id: int, fold: int) -> str:
+        return f"{self.split_dirs[task_id]}/splits_{fold}.csv"
+
+    def _make_loader(self, dataset, shuffle: bool) -> DataLoader:
+        """Helper dùng chung — tránh lặp DataLoader constructor 6 lần."""
+        return DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=shuffle,
+            num_workers=self.num_workers,
+            collate_fn=collate_MIL,
+        )
+
+    def get_data_loaders(self, fold: int, task_id: int):
+        """Trả về (train_loader, val_loader, test_loader) cho một task + fold."""
+        train_ds, val_ds, test_ds = self.datasets[task_id].return_splits(
+            from_id=False,
+            csv_path=self._split_csv(task_id, fold),
+        )
+        train_loader = self._make_loader(train_ds, shuffle=True)
+        val_loader   = self._make_loader(val_ds,   shuffle=True)
+        test_loader  = self._make_loader(test_ds,  shuffle=False)
+
         self.test_loaders.append(test_loader)
         self.train_loader = train_loader
-        self.val_loader = val_loader
-        return (train_loader, val_loader, test_loader)
+        self.val_loader   = val_loader
 
-    def get_joint_data_loaders(self, FOLD):
-        train_datasets, val_datasets, test_datasets = ([], [], [])
-        for n in range(self.N_TASKS):
-            print('Loading dataset ', n)
-            dataset = self.datasets[n]
-            train_dataset, val_dataset, test_dataset = dataset.return_splits(from_id=False, csv_path='{}/splits_{}.csv'.format(self.split_dirs[n], FOLD))
-            train_datasets.append(train_dataset)
-            val_datasets.append(val_dataset)
-            test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=4, collate_fn=collate_MIL)
+        return train_loader, val_loader, test_loader
+
+    def get_joint_data_loaders(self, fold: int):
+        """
+        Trả về (train_loader, val_loader, test_loaders) gộp tất cả N_TASKS.
+        test_loaders là list — một phần tử per task.
+        """
+        train_datasets, val_datasets, test_loaders = [], [], []
+
+        for task_id in range(self.N_TASKS):
+            print(f"Loading dataset task {task_id} ...")
+            train_ds, val_ds, test_ds = self.datasets[task_id].return_splits(
+                from_id=False,
+                csv_path=self._split_csv(task_id, fold),
+            )
+            train_datasets.append(train_ds)
+            val_datasets.append(val_ds)
+
+            test_loader = self._make_loader(test_ds, shuffle=False)
+            test_loaders.append(test_loader)
             self.test_loaders.append(test_loader)
-        
-        train_dataset = ConcatDataset(train_datasets)
-        val_dataset = ConcatDataset(val_datasets)
-        train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, num_workers=4, collate_fn=collate_MIL)
-        val_loader = DataLoader(val_dataset, batch_size=1, shuffle=True, num_workers=4, collate_fn=collate_MIL)
-        
-        self.i = self.N_CLASSES_PER_TASK * self.N_TASKS
+
+        train_loader = self._make_loader(ConcatDataset(train_datasets), shuffle=True)
+        val_loader   = self._make_loader(ConcatDataset(val_datasets),   shuffle=True)
+
+        self.i            = self.N_CLASSES_PER_TASK * self.N_TASKS
         self.train_loader = train_loader
-        self.val_loader = val_loader
+        self.val_loader   = val_loader
+
+        return train_loader, val_loader, test_loaders
         
-        return (train_loader, val_loader, test_loader)
-    
 if __name__ == '__main__':
     seq_dataset = Sequential_Generic_MIL_Dataset()
     fold = 0

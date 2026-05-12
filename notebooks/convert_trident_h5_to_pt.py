@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - fallback for minimal environments.
 
 
 DEFAULT_FEATURES_DIR = (
-    "/datastore/uittogether2/LuuTru/Thanhld/WSI/dataset/TCGA-ESCA/"
+    "/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset/TCGA-BRCA/"
     "preprocessed/10x_256px_0px_overlap/features_conch_v15"
 )
 

@@ -1,0 +1,50 @@
+# configs/default.yaml
+# Thay /path/to/your/dataset bằng root thực tế trên máy của bạn
+
+dataset:
+  root: "/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset"
+
+  brca:
+    csv: "${dataset.root}/wsi_dataset_annotation/tcga_brca/tcga_brca_subset.csv"
+    features: "${dataset.root}/TCGA-BRCA/preprocessed/10x_256px_0px_overlap/features_conch_v15/"
+    splits: "${dataset.root}/wsi_dataset_annotation/tcga_brca"
+
+  rcc:
+    csv: "${dataset.root}/wsi_dataset_annotation/tcga_rcc/tcga_kidney_subset.csv"
+    features: "${dataset.root}/TCGA-RCC/preprocessed/10x_256px_0px_overlap/features_conch_v15/"
+    splits: "${dataset.root}/wsi_dataset_annotation/tcga_rcc"
+
+  nsclc:
+    csv: "${dataset.root}/wsi_dataset_annotation/tcga_nsclc/tcga_lung_subset.csv"
+    features: "${dataset.root}/TCGA-NSCLC/preprocessed/10x_256px_0px_overlap/features_conch_v15/"
+    splits: "${dataset.root}/wsi_dataset_annotation/tcga_nsclc"
+
+  esca:
+    features: "${dataset.root}/TCGA-ESCA/preprocessed/10x_256px_0px_overlap/features_conch_v15/"
+    splits: "${dataset.root}/wsi_dataset_annotation/tcga_esca"
+
+  tgct:
+    features: "${dataset.root}/TCGA-TGCT/preprocessed/10x_256px_0px_overlap/features_conch_v15/"
+    splits: "${dataset.root}/wsi_dataset_annotation/tcga_tgct"
+
+  cesc:
+    features: "${dataset.root}/TCGA-CESC/preprocessed/10x_256px_0px_overlap/features_conch_v15/"
+    splits: "${dataset.root}/wsi_dataset_annotation/tcga_cesc"
+
+training:
+  num_epochs: 10
+  lr: 1.0e-5
+  weight_decay: 1.0e-4
+  batch_size: 1
+  num_workers: 40
+  seed: 0
+  num_folds: 3
+
+dataloader:
+  batch_size: 1       # MIL cố định batch=1 (mỗi WSI là 1 bag có kích thước khác nhau)
+  num_workers: 40      # tăng nếu CPU nhiều core, giảm nếu debug
+
+paths:
+  task_prompts: "./task_prompts.pt"
+  finetuned_checkpoints: "./checkpoints/finetuned"
+  merged_checkpoints: "./checkpoints/merged"
