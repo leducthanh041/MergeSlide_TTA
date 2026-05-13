@@ -111,8 +111,8 @@ def eval_task_tcp(
             probs_all.append(probs.cpu().numpy())
             targets_all.append(label.numpy())
 
-            g_label = TASK_TO_GLOBAL_CLASS[task_id].get(int(label), -1)
-            g_pred  = TASK_TO_GLOBAL_CLASS[task_id].get(pred, -1)
+            g_label = seq_dataset.task_to_global_class[task_id].get(int(label), -1)
+            g_pred  = seq_dataset.task_to_global_class[task_id].get(pred, -1)
             convert_targets_all.append(np.array([g_label]))
             convert_preds_all.append(np.array([g_pred]))
 
@@ -128,6 +128,8 @@ def eval_task_naive(
     model: CustomSequential,
     all_class_embeddings: torch.Tensor,
     device,
+    task_to_global_class: dict,
+    task_class_ranges: dict,
 ) -> tuple:
     """
     Naive inference:
@@ -147,10 +149,10 @@ def eval_task_naive(
     ps = torch.tensor(TITAN_PS_ARG).int().to(device)
 
     # Ánh xạ ngược: global class → local class của task_id
-    global_to_local = {v: k for k, v in TASK_TO_GLOBAL_CLASS[task_id].items()}
+    global_to_local = {v: k for k, v in task_to_global_class[task_id].items()}
 
     # Class index range của task_id trong 13-class space
-    start, end = TASK_CLASS_RANGES[task_id]
+    start, end      = task_class_ranges[task_id]
 
     with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
         for features, coords, label in tqdm(test_loader, leave=False):
@@ -179,7 +181,7 @@ def eval_task_naive(
             probs_all.append(probs_local.cpu().numpy())
             targets_all.append(label.numpy())
 
-            g_label = TASK_TO_GLOBAL_CLASS[task_id].get(int(label), -1)
+            g_label = task_to_global_class[task_id].get(int(label), -1)
             convert_targets_all.append(np.array([g_label]))
             convert_preds_all.append(np.array([global_pred]))
 
@@ -263,12 +265,14 @@ if __name__ == "__main__":
     seed_torch(device, cfg.training.seed)
 
     num_tasks    = cfg.training.num_tasks
-    num_classes  = NUM_CLASSES
     seq_dataset  = Sequential_Generic_MIL_Dataset(cfg)
+    num_classes  = seq_dataset.num_classes
 
     # Load embeddings tuỳ theo mode
     if args.mode == "tcp":
-        task_prompts        = torch.load(PROJECT_ROOT / "task_prompts.pt").to(device)
+        task_prompts = torch.load(PROJECT_ROOT / "task_prompts.pt").to(device)
+        if getattr(cfg.dataset, 'order', 'forward') == 'reverse':
+            task_prompts = task_prompts.flip(0)
         all_class_embeddings = None
     else:
         task_prompts        = None
@@ -325,6 +329,8 @@ if __name__ == "__main__":
                 result = eval_task_naive(
                     test_loader, task_id, model,
                     all_class_embeddings, device,
+                    task_to_global_class=seq_dataset.task_to_global_class,
+                    task_class_ranges=seq_dataset.task_class_ranges,
                 )
 
             results, preds_all, targets_all, probs_all, \

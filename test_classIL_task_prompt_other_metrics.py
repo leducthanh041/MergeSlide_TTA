@@ -103,8 +103,9 @@ def eval_task_naive(
     model: CustomSequential,
     all_class_embeddings: torch.Tensor,
     device,
-    max_classes: int = None,    # ← số class tối đa đã học đến thời điểm này
-                                 #   None = dùng full 13 (cho final eval)
+    task_to_global_class: dict,
+    task_class_ranges: dict, 
+    max_classes: int = None,
 ) -> tuple:
     """
     Naive inference:
@@ -119,8 +120,8 @@ def eval_task_naive(
 
     ps = torch.tensor(TITAN_PS_ARG).int().to(device)
 
-    global_to_local = {v: k for k, v in TASK_TO_GLOBAL_CLASS[task_id].items()}
-    start, end      = TASK_CLASS_RANGES[task_id]
+    global_to_local = {v: k for k, v in task_to_global_class[task_id].items()}
+    start, end      = task_class_ranges[task_id]
 
     # Slice embeddings về không gian class đã học
     effective_embeddings = (
@@ -216,12 +217,14 @@ if __name__ == "__main__":
     seed_torch(device, cfg.training.seed)
 
     num_tasks   = cfg.training.num_tasks
-    num_classes = NUM_CLASSES
-    seq_dataset = Sequential_Generic_MIL_Dataset(cfg)
+    seq_dataset  = Sequential_Generic_MIL_Dataset(cfg)
+    num_classes  = seq_dataset.num_classes
 
     # Load embeddings tuỳ theo mode
     if args.mode == "tcp":
-        task_prompts         = torch.load(PROJECT_ROOT / "task_prompts.pt").to(device)
+        task_prompts = torch.load(PROJECT_ROOT / "task_prompts.pt").to(device)
+        if getattr(cfg.dataset, 'order', 'forward') == 'reverse':
+            task_prompts = task_prompts.flip(0)
         all_class_embeddings = None
     else:
         task_prompts         = None
@@ -303,7 +306,9 @@ if __name__ == "__main__":
                     _, preds_all, targets_all = eval_task_naive(
                         test_loader, task_id, model,
                         all_class_embeddings, device,
-                        max_classes=sum(NUM_CLASSES[:seq_task]),
+                        max_classes=sum(seq_dataset.num_classes[:seq_task]),
+                        task_to_global_class=seq_dataset.task_to_global_class,
+                        task_class_ranges=seq_dataset.task_class_ranges,
                     )
 
                 num_correct += sum(preds_all == targets_all)

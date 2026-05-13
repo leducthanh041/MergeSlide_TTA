@@ -69,7 +69,7 @@ def eval_task(
 
             pred = int(logits.argmax(1))
 
-            if NUM_CLASSES[task_id] == 2:
+            if num_classes[task_id] == 2:
                 probs      = nn.functional.softmax(logits, dim=1)[:, 1]
                 roc_kwargs = {}
             else:
@@ -110,8 +110,8 @@ if __name__ == "__main__":
     seed_torch(device, cfg.training.seed)
 
     num_tasks    = cfg.training.num_tasks
-    num_classes  = NUM_CLASSES
     seq_dataset  = Sequential_Generic_MIL_Dataset(cfg)
+    num_classes  = seq_dataset.num_classes
 
     print("Loading TITAN base model ...")
     base_model = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
@@ -168,7 +168,7 @@ if __name__ == "__main__":
             all_baccs.append(bacc)
             all_accs.append(acc)
 
-            print(f"  Fold {fold_id} | {TASK_NAMES[task_id]}: "
+            print(f"  Fold {fold_id} | {seq_dataset.task_names[task_id]}: "
                   f"BAcc={bacc*100:.4f}% Acc={acc*100:.4f}%")
 
         overall_baccs.append(np.mean(all_baccs))
@@ -188,4 +188,4 @@ if __name__ == "__main__":
         for t in range(num_tasks):
             accs[t].append(fold_acc[t])
     for t in range(num_tasks):
-        print(f"  {TASK_NAMES[t]}: {np.mean(accs[t])*100:.4f}% ({np.std(accs[t])*100:.4f}%)")
+        print(f"  {seq_dataset.task_names[t]}: {np.mean(accs[t])*100:.4f}% ({np.std(accs[t])*100:.4f}%)")

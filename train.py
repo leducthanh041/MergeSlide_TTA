@@ -191,15 +191,15 @@ if __name__ == "__main__":
                 if getattr(cfg.dataset, 'order', 'forward') == 'reverse'
                 else TASK_NAMES
             )
-            print(f"\n--- Task {task_id} ({task_names[task_id]}) ---")
+            print(f"\n--- Task {task_id} ({seq_dataset.task_names[task_id]}) ---")
             print_gpu_vram(f"before_task_{task_id}", device)
             train_loader, val_loader, _ = seq_dataset.get_data_loaders(fold_id, task_id)
 
             model = build_model(
                 task_id=task_id,
-                num_classes=NUM_CLASSES[task_id],
+                num_classes=seq_dataset.num_classes[task_id],
                 prompt_classifier=classifier,
-                task_class_ranges=TASK_CLASS_RANGES,
+                classifier_class_ranges=seq_dataset.classifier_class_ranges,
                 device=str(device),
             )
             print_gpu_vram(f"after_build_model_task_{task_id}", device)
