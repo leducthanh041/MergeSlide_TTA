@@ -1,0 +1,20 @@
+# Core numerical/data stack
+numpy
+pandas
+scipy
+scikit-learn
+h5py
+tqdm
+omegaconf
+
+# Model/runtime stack
+# Install the CUDA-compatible PyTorch wheels for your server first if needed:
+# https://pytorch.org/get-started/locally/
+torch
+torchvision
+transformers
+
+# Visualization and logging used by opcm_mergeslide.py
+matplotlib
+seaborn
+tensorboard

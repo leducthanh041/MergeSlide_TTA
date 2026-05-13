@@ -35,10 +35,9 @@ training:
   num_epochs: 10
   lr: 1.0e-5
   weight_decay: 1.0e-4
-  batch_size: 1
-  num_workers: 40
   seed: 0
   num_folds: 10
+  num_tasks: 6
 
 dataloader:
   batch_size: 1       # MIL cố định batch=1 (mỗi WSI là 1 bag có kích thước khác nhau)
