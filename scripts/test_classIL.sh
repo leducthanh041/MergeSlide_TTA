@@ -91,4 +91,5 @@ cd /datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA
 
 python -u test_classIL_task_prompt.py \
     --save_dir ./checkpoints/finetuned \
-    --merge_model_path ./checkpoints/merged
+    --merge_model_path ./checkpoints/merged \
+    --mode naive

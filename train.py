@@ -15,7 +15,7 @@ from omegaconf import OmegaConf
 from sklearn.metrics import balanced_accuracy_score
 from tqdm import tqdm
 
-from mergeslide_tta.constants import NUM_TASKS, NUM_CLASSES, TASK_CLASS_RANGES, K_PATCHES, TITAN_PS_ARG
+from mergeslide_tta.constants import NUM_TASKS, NUM_CLASSES, TASK_CLASS_RANGES, K_PATCHES, TITAN_PS_ARG, TASK_NAMES
 from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
 from mergeslide_tta.model import build_model, build_prompt_classifier, cosine_lr, EarlyStopping
 from mergeslide_tta.utils import seed_torch
@@ -186,7 +186,12 @@ if __name__ == "__main__":
         print(f"\n{'='*50}\nFold {fold_id}\n{'='*50}")
 
         for task_id in range(NUM_TASKS):   # ← FIX: range(NUM_TASKS) không phải range(3)
-            print(f"\n--- Task {task_id} ({['BRCA','RCC','NSCLC','ESCA','TGCT','CESC'][task_id]}) ---")
+            task_names = (
+                list(reversed(TASK_NAMES))
+                if getattr(cfg.dataset, 'order', 'forward') == 'reverse'
+                else TASK_NAMES
+            )
+            print(f"\n--- Task {task_id} ({task_names[task_id]}) ---")
             print_gpu_vram(f"before_task_{task_id}", device)
             train_loader, val_loader, _ = seq_dataset.get_data_loaders(fold_id, task_id)
 

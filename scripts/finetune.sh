@@ -89,4 +89,4 @@ echo "[INFO] launching training at $(date)"
 
 cd /datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA
 
-python -u train.py
+python -u train.py --config configs/default_reverse.yaml

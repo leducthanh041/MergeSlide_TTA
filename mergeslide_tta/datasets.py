@@ -5,11 +5,9 @@ from torchvision.transforms import transforms
 from torch.utils.data import DataLoader
 from typing import Tuple
 from torchvision import datasets
-import numpy as np
 import torch.optim
 import os
 import torch
-import numpy as np
 import pandas as pd
 import math
 from scipy import stats
@@ -580,6 +578,12 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
             # Lấy dataloader config từ yaml
             self.batch_size  = cfg.dataloader.batch_size
             self.num_workers = cfg.dataloader.num_workers
+
+            # Đảo thứ tự nếu config yêu cầu
+            order = getattr(cfg.dataset, "order", "forward")
+            if order == "reverse":
+                self.datasets   = list(reversed(self.datasets))
+                self.split_dirs = list(reversed(self.split_dirs))
         else:
             self._init_hardcoded()
             # Fallback về giá trị gốc
