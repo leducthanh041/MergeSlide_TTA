@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=evaluate
-#SBATCH --output=/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/logs/evaluate_%j.out
-#SBATCH --error=/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/logs/evaluate_%j.err
+#SBATCH --job-name=test_classIL
+#SBATCH --output=/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/logs/test_classIL_%j.out
+#SBATCH --error=/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/logs/test_classIL_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
@@ -89,6 +89,6 @@ echo "[INFO] launching training at $(date)"
 
 cd /datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA
 
-python -u evaluate.py --mode class_il     --config configs/default.yaml
-python -u evaluate.py --mode class_il_bwt --config configs/default.yaml
-python -u evaluate.py --mode task_il      --config configs/default.yaml
+python -u test_classIL_task_prompt.py \
+    --save_dir ./checkpoints/finetuned \
+    --merge_model_path ./checkpoints/merged

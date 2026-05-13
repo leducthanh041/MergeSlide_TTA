@@ -102,6 +102,7 @@ def run_class_il_inference(
     task_prompts: torch.Tensor,
     mlp_weights: list[dict],
     device: str,
+    use_tcp: bool = True,
 ) -> dict:
     """
     Class-IL inference cho 1 task:
@@ -127,12 +128,17 @@ def run_class_il_inference(
 
             slide_embed = model.backbone(features, coords, ps)
 
-            # Task routing via prompt alignment
-            pred_task_id = int(torch.argmax(slide_embed @ task_prompts.T))
+            if use_tcp:
+                # Routing qua task_prompts → MLP head tương ứng
+                pred_task_id = int(torch.argmax(slide_embed @ task_prompts.T))
+                mlp = nn.Linear(EMBED_DIM, NUM_CLASSES[pred_task_id]).to(device)
+                mlp.load_state_dict(mlp_weights[pred_task_id])
+                logits = mlp(slide_embed).float()
+            else:
+                # Naive: dot-product với toàn bộ 13 class prompts
+                logits = (slide_embed @ all_class_prompts.T).float()  # [1, 13]
 
-            mlp = nn.Linear(EMBED_DIM, NUM_CLASSES[pred_task_id]).to(device)
-            mlp.load_state_dict(mlp_weights[pred_task_id])
-            logits = mlp(slide_embed).float()
+
             probs  = nn.functional.softmax(logits, dim=1)
             pred   = int(logits.argmax(1))
 
@@ -167,22 +173,30 @@ def run_class_il_inference(
 
 @torch.no_grad()
 def run_task_il_inference(
-    model: CustomSequential,
+    base_model: nn.Module,
     test_loader,
     task_id: int,
     mlp_weights: list[dict],
     device: str,
 ) -> dict:
     """
-    Task-IL inference: dùng ground-truth task_id — không cần task routing.
-    Đây là upper bound setting.
+    Task-IL inference: ground-truth task_id được cung cấp sẵn.
+    Gắn MLP head đúng task vào backbone rồi forward thẳng —
+    không cần task routing qua task_prompts.
     """
-    ps          = torch.tensor(TITAN_PS_ARG).int().to(device)
+    ps = torch.tensor(TITAN_PS_ARG).int().to(device)
+
+    # Gắn MLP head của đúng task vào backbone — đúng theo code gốc test_taskIL.py
+    mlp = nn.Linear(EMBED_DIM, NUM_CLASSES[task_id]).to(device)
+    mlp.weight.data.normal_(mean=0.0, std=0.01)
+    mlp.bias.data.zero_()
+    model = CustomSequential(base_model, mlp)
+    model.mlp.load_state_dict(mlp_weights[task_id])
+    model.eval()
+
     preds_all   = []
     targets_all = []
-
-    mlp = nn.Linear(EMBED_DIM, NUM_CLASSES[task_id]).to(device)
-    mlp.load_state_dict(mlp_weights[task_id])
+    probs_all   = []
 
     with torch.cuda.amp.autocast(dtype=torch.bfloat16):
         for features, coords, label in test_loader:
@@ -191,17 +205,33 @@ def run_task_il_inference(
             idx      = torch.randperm(features.shape[0])[:K_PATCHES]
             features, coords = features[idx], coords[idx]
 
-            slide_embed = model.backbone(features, coords, ps)
-            logits      = mlp(slide_embed).float()
-            pred        = int(logits.argmax(1))
+            logits = model(features, coords, ps).float()
 
-            preds_all.append(pred)
-            targets_all.append(int(label))
+            if NUM_CLASSES[task_id] == 2:
+                probs      = nn.functional.softmax(logits, dim=1)[:, 1]
+                roc_kwargs = {}
+            else:
+                probs      = nn.functional.softmax(logits, dim=1)
+                roc_kwargs = {"multi_class": "ovo", "average": "macro"}
 
+            preds_all.append(logits.argmax(1).cpu().numpy())
+            targets_all.append(label.numpy())
+            probs_all.append(probs.cpu().numpy())
+
+    preds_arr   = np.concatenate(preds_all)
+    targets_arr = np.concatenate(targets_all)
+    try:
+        probs_arr = np.concatenate(probs_all)
+    except ValueError:
+        probs_arr = pad_numpy_arrays(probs_all)
+
+    metrics = get_eval_metrics(targets_arr, preds_arr, probs_arr,
+                               roc_kwargs=roc_kwargs, prefix="")
     return {
-        "preds":   np.array(preds_all),
-        "targets": np.array(targets_all),
-        "bacc":    balanced_accuracy_score(targets_all, preds_all),
+        "preds":   preds_arr,
+        "targets": targets_arr,
+        "bacc":    balanced_accuracy_score(targets_arr, preds_arr),
+        "metrics": metrics,
     }
 
 
@@ -316,27 +346,47 @@ def eval_task_il(cfg) -> None:
         "MahmoodLab/TITAN", trust_remote_code=True
     ).to(device)
 
-    all_baccs = []
+    all_baccs       = []
+    all_acc_per_task = {task_id: [] for task_id in range(NUM_TASKS)}
 
     for fold_id in tqdm(range(cfg.training.num_folds), desc="Folds"):
-        ckpt_path   = get_final_ckpt_path(cfg.paths.merged_checkpoints, fold_id)
-        model       = load_merged_model(ckpt_path, base_model, device)
+        ckpt_path = get_final_ckpt_path(cfg.paths.merged_checkpoints, fold_id)
+
+        # Load merged vision encoder weights vào base_model
+        merged_weights = torch.load(str(ckpt_path), map_location="cpu")
+        base_model.vision_encoder.load_state_dict(merged_weights, strict=True)
+
         mlp_weights = load_task_mlp_weights(cfg.paths.finetuned_checkpoints, fold_id)
 
         fold_baccs = []
         for task_id in range(NUM_TASKS):
             _, _, test_loader = seq_dataset.get_data_loaders(fold_id, task_id)
+
+            # Truyền base_model thay vì CustomSequential — run_task_il_inference
+            # tự build CustomSequential với đúng MLP head bên trong
             result = run_task_il_inference(
-                model, test_loader, task_id, mlp_weights, device
+                base_model  = base_model,
+                test_loader = test_loader,
+                task_id     = task_id,
+                mlp_weights = mlp_weights,
+                device      = device,
             )
+
             fold_baccs.append(result["bacc"])
-            print(f"  Fold {fold_id} | {TASK_NAMES[task_id]}: BAcc={result['bacc']:.4f}")
+            all_acc_per_task[task_id].append(result["metrics"].get("/acc", 0.0))
+            print(f"  Fold {fold_id} | {TASK_NAMES[task_id]}: "
+                  f"BAcc={result['bacc']:.4f}")
 
         all_baccs.append(np.mean(fold_baccs))
 
     print("\n===== Task-IL Results =====")
     print(f"BAcc: {np.mean(all_baccs):.4f} ± {np.std(all_baccs):.4f}")
 
+    # Per-task accuracy — giống format output code gốc
+    for task_id in range(NUM_TASKS):
+        accs = all_acc_per_task[task_id]
+        print(f"  {TASK_NAMES[task_id]}: "
+              f"Acc={np.mean(accs):.4f} ± {np.std(accs):.4f}")
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -347,6 +397,11 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default="configs/default.yaml")
     parser.add_argument("--mode",   type=str, default="class_il",
                         choices=["class_il", "class_il_bwt", "task_il"])
+
+    parser.add_argument("--tcp", action="store_true", default=True,
+                    help="Dùng TCP inference (default: True). --no-tcp để chạy naive.")
+    parser.add_argument("--no-tcp", dest="tcp", action="store_false")
+
     args = parser.parse_args()
 
     cfg = OmegaConf.load(args.config)
