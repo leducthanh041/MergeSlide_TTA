@@ -27,7 +27,7 @@ class CustomSequential(nn.Module):
 
 
 def build_model(task_id: int, num_classes: int, prompt_classifier: torch.Tensor,
-                task_class_ranges: dict, device: str) -> CustomSequential:
+                classifier_class_ranges: dict, device: str) -> CustomSequential:
     """
     Load a fresh TITAN model and attach a prompt-initialized, frozen MLP head.
 
@@ -48,7 +48,7 @@ def build_model(task_id: int, num_classes: int, prompt_classifier: torch.Tensor,
     mlp.bias.data.zero_()
 
     # Init MLP weights from prompt prototypes (frozen — never updated during training)
-    start, end = task_class_ranges[task_id]
+    start, end = classifier_class_ranges[task_id]
     mlp.weight.data = prompt_classifier[:, start:end + 1].T
 
     for param in mlp.parameters():

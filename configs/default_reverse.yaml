@@ -2,9 +2,9 @@
 # Thay /path/to/your/dataset bằng root thực tế trên máy của bạn
 
 dataset:
-  root: "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset"
+  root: "/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset"
   
-  order: "forward"
+  order: "reverse"
 
   brca:
     csv: "${dataset.root}/wsi_dataset_annotation/tcga_brca/tcga_brca_subset.csv"
@@ -47,5 +47,5 @@ dataloader:
 
 paths:
   task_prompts: "./task_prompts.pt"
-  finetuned_checkpoints: "./checkpoints/finetuned"
-  merged_checkpoints: "./checkpoints/merged"
+  finetuned_checkpoints: "./checkpoints/finetuned_reverse"
+  merged_checkpoints: "./checkpoints/merged_reverse"

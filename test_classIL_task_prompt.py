@@ -1,447 +1,401 @@
+# test_classIL_task_prompt.py
+"""
+Class-IL evaluation — hỗ trợ cả TCP và Naive inference.
+
+Modes:
+    tcp   (default): Task-to-Class Prompt-Aligned inference
+                     t_hat = argmax(Z @ Task_Embeddings.T)
+                     y_pred = argmax(Z @ Class_Embeddings[t_hat].T)
+
+    naive          : Direct class inference
+                     y_pred = argmax(Z @ All_Class_Embeddings.T)
+
+Usage:
+    python test_classIL_task_prompt.py \
+        --save_dir /path/to/finetuned_checkpoints \
+        --merge_model_path /path/to/merged/checkpoints \
+        --mode tcp      # hoặc --mode naive
+
+Cấu trúc checkpoint kỳ vọng:
+    Finetuned : {save_dir}/fold_{id}/task_{t}.pt
+    Merged    : {merge_model_path}/fold_{id}/merged_final.pth
+"""
 import argparse
+import time
 from pathlib import Path
 
 import numpy as np
 import torch
-torch.manual_seed(42)  # Set seed
 import torch.nn as nn
-from sklearn.metrics import balanced_accuracy_score, roc_auc_score, precision_score, recall_score, f1_score
+from omegaconf import OmegaConf
+from sklearn.metrics import (
+    balanced_accuracy_score, f1_score,
+    precision_score, recall_score, roc_auc_score,
+)
 from tqdm import tqdm
 from transformers import AutoModel
-import time
+
+from mergeslide_tta.constants import (
+    EMBED_DIM, K_PATCHES, NUM_CLASSES, NUM_TASKS,
+    TASK_CLASS_RANGES, TASK_TO_GLOBAL_CLASS, TITAN_PS_ARG,
+)
 from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
+from mergeslide_tta.metrics import pad_numpy_arrays
+from mergeslide_tta.model import CustomSequential
 from mergeslide_tta.prompts_zeroshot import (
-    brca_prompts,
-    cesc_prompts,
-    esca_prompts,
-    nsclc_prompts,
-    rcc_prompts,
-    tgct_prompts,
+    brca_prompts, rcc_prompts, nsclc_prompts,
+    esca_prompts, tgct_prompts, cesc_prompts,
 )
 from mergeslide_tta.utils import get_eval_metrics, seed_torch
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
-def pad_numpy_arrays(arrays, pad_value=0.0):
+
+# ---------------------------------------------------------------------------
+# Inference functions
+# ---------------------------------------------------------------------------
+
+def eval_task_tcp(
+    test_loader,
+    task_id: int,
+    model: CustomSequential,
+    num_classes: list,
+    task_prompts: torch.Tensor,
+    task_model_paths: list,
+    device,
+) -> tuple:
     """
-    Pads a list of NumPy arrays with varying shapes to the same shape and stacks them.
-
-    Args:
-        arrays (List[np.ndarray]): List of NumPy arrays with varying shapes.
-        pad_value (float): Value to use for padding.
-
-    Returns:
-        np.ndarray: A stacked NumPy array of shape (len(arrays), *max_shape)
+    TCP inference:
+      1. t_hat = argmax(Z @ Task_Embeddings.T)
+      2. y_pred = argmax(Z @ Class_Embeddings[t_hat].T)  via MLP head
     """
-    # Step 1: Normalize dimensions
-    max_dim = max(arr.ndim for arr in arrays)
-    arrays = [arr.reshape((1,) * (max_dim - arr.ndim) + arr.shape) for arr in arrays]
-
-    # Step 2: Compute max shape
-    max_shape = np.max([arr.shape for arr in arrays], axis=0)
-
-    # Step 3: Pad each array
-    padded_arrays = []
-    for arr in arrays:
-        pad_width = [(0, max_dim_i - arr.shape[i]) for i, max_dim_i in enumerate(max_shape)]
-        padded = np.pad(arr, pad_width=pad_width, mode='constant', constant_values=pad_value)
-        padded_arrays.append(padded)
-
-    # Step 4: Stack
-    return np.stack(padded_arrays)
-
-device = 'cuda:0'
-titan_model = AutoModel.from_pretrained('MahmoodLab/TITAN', trust_remote_code=True)
-titan_model = titan_model.to(device)
-
-_, TEMPLATES = brca_prompts()
-CLASS_PROMPTS = []
-
-print("Getting Prompt Prototypes ...")
-for prompts in [brca_prompts, rcc_prompts, nsclc_prompts, esca_prompts, tgct_prompts, cesc_prompts]:
-    class_prompts, _ = prompts()
-    CLASS_PROMPTS.extend(class_prompts)
-
-with torch.autocast('cuda', torch.float16), torch.inference_mode():
-    classifier = titan_model.zero_shot_classifier(CLASS_PROMPTS, TEMPLATES, device=device)
-
-dict_classes = {
-    0: [0, 1],
-    1: [2, 4],
-    2: [5, 6],
-    3: [7, 8],
-    4: [9, 10],
-    5: [11, 12]
-}
-
-"""
-Script to finetune TITAN on a dummy dataset. Dataset class needs to be adapted to a custom dataset and task.
-"""
-
-MAX_NUM_PATCHES = 10000
-
-class CustomSequential(nn.Module):
-    def __init__(self, model, mlp):
-        super(CustomSequential, self).__init__()
-        self.backbone = model.vision_encoder
-        self.mlp = mlp
-
-    def forward(self, features, coords, ps):
-        x = self.backbone(features, coords, ps)
-        x = self.mlp(x)
-        return x
-
-def create_mlp(in_dim=None, hid_dims=[], act=nn.ReLU(), dropout=0.0, out_dim=None, end_with_fc=True):
-    layers = []
-    if len(hid_dims) > 0:
-        for hid_dim in hid_dims:
-            layers.append(nn.Linear(in_dim, hid_dim))
-            layers.append(act)
-            layers.append(nn.Dropout(dropout))
-            in_dim = hid_dim
-    layers.append(nn.Linear(in_dim, out_dim))
-    if not end_with_fc:
-        layers.append(act)
-        layers.append(nn.Dropout(dropout))
-    mlp = nn.Sequential(*layers)
-    return mlp
-
-
-def cosine_lr(optimizer, base_lr, warmup_length, steps):
-    """Copied from https://github.com/mlfoundations/open_clip/blob/main/src/open_clip_train/scheduler.py
-    """
-    def _warmup_lr(base_lr, warmup_length, step):
-        return base_lr * (step + 1) / warmup_length
-    
-    def _assign_learning_rate(optimizer, new_lr):
-        for param_group in optimizer.param_groups:
-            if "lr_scale" in param_group:
-                param_group["lr"] = new_lr * param_group["lr_scale"]
-            else:
-                param_group["lr"] = new_lr
-    
-    def _lr_adjuster(step):
-        if step < warmup_length:
-            lr = _warmup_lr(base_lr, warmup_length, step)
-        else:
-            e = step - warmup_length
-            es = steps - warmup_length
-            lr = 0.5 * (1 + np.cos(np.pi * e / es)) * base_lr
-        _assign_learning_rate(optimizer, lr)
-        return lr
-
-    return _lr_adjuster
-
-class EarlyStopping:
-    def __init__(self, patience=5, min_delta=0.0, verbose=False):
-        """
-        Args:
-            patience (int): How long to wait after the last improvement.
-            min_delta (float): Minimum change to qualify as an improvement.
-            verbose (bool): If True, prints a message for each improvement.
-        """
-        self.patience = patience
-        self.min_delta = min_delta
-        self.verbose = verbose
-        self.counter = 0
-        self.best_score = None
-        self.early_stop = False
-        self.val_loss_min = float("inf")
-        self.best_model_weights = None
-
-    def __call__(self, val_loss, model):
-        # Check if the new loss is an improvement
-        if self.best_score is None:
-            self.best_score = val_loss
-            self.best_model_weights = model.state_dict()
-        elif val_loss > self.best_score - self.min_delta:
-            self.counter += 1
-            if self.verbose:
-                print(f"EarlyStopping counter: {self.counter} out of {self.patience}")
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_score = val_loss
-            self.counter = 0
-            self.best_model_weights = model.state_dict()
-
-def eval(test_loader, task_id, model, dict_class, num_classes, device, task_prompts, task_model_paths, merge_mlp_data, prefix, save_location, **kwargs):
-    preds_all = []
-    probs_all = []
-    targets_all = []
-
-    convert_preds_all = []
+    preds_all           = []
+    probs_all           = []
+    targets_all         = []
+    convert_preds_all   = []
     convert_targets_all = []
+    times               = []
 
-    K = 300
-    dict_convert_class = {
-        0: {0:0, 1:1},
-        1: {0:2, 1:3, 2:4},
-        2: {0:5, 1:6},
-        3: {0:7, 1:8},
-        4: {0:9, 1:10},
-        5: {0:11, 1:12}
-    }
+    ps = torch.tensor(TITAN_PS_ARG).int().to(device)
 
-    times = []
-    
-    task_weights = [torch.load(model_path) for model_path in task_model_paths]
-    task_weights = [{k.split('mlp.')[-1]:task_weight[k] for k in list(task_weight.keys())[-2:]} for task_weight in task_weights]
+    # Pre-load tất cả MLP weights
+    task_weights = []
+    for p in task_model_paths:
+        state = torch.load(p, map_location="cpu")
+        task_weights.append(
+            {k.split("mlp.")[-1]: state[k] for k in list(state.keys())[-2:]}
+        )
 
     with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
-        slide_per_task = []
-        slide_per_class = {}
-        for features, coords, label in tqdm(test_loader):
+        for features, coords, label in tqdm(test_loader, leave=False):
             features = features.to(device)
-            coords = coords.long().to(device)
+            coords   = coords.long().to(device)
+            idx      = torch.randperm(features.shape[0])[:K_PATCHES]
+            features, coords = features[idx], coords[idx]
 
-            # 1. Random sampling
-            indices = torch.randperm(features.shape[0])[:K]
-            features = features[indices, :]
-            coords = coords[indices, :]
+            t0 = time.time()
 
-            start = time.time()
-            # 2. Get slide embedding
-            slide_embed = model.backbone(features, coords, torch.tensor(1024).int().to(device), **kwargs)
-            
-            # 3. Get predicted task_id
-            predicted_task_id = torch.argmax(slide_embed @ task_prompts.T)
+            # Bước 1: task routing
+            slide_embed  = model.backbone(features, coords, ps)
+            pred_task_id = int(torch.argmax(slide_embed @ task_prompts.T))
 
-            # if predicted task id usable, use it
-            # task_weight = torch.load(task_model_paths[int(predicted_task_id)])
-            mlp = nn.Linear(768, num_classes[predicted_task_id]).to(device)
-            mlp.load_state_dict(task_weights[int(predicted_task_id)])
-            # logits = (slide_embed @ task_weights[int(predicted_task_id)]['weight'].T) + task_weights[int(predicted_task_id)]['bias']
-            
-            # task_weight
-            logits = mlp(slide_embed)
-            logits = logits.float()
-            preds = logits.argmax(1)
-            end = time.time()
-            times.append(end - start)
-                
+            # Bước 2: class prediction via MLP head của task dự đoán
+            mlp = nn.Linear(EMBED_DIM, num_classes[pred_task_id]).to(device)
+            mlp.load_state_dict(task_weights[pred_task_id])
+            logits = mlp(slide_embed).float()
+            pred   = int(logits.argmax(1))
+            times.append(time.time() - t0)
+
             probs = nn.functional.softmax(logits, dim=1)
-            roc_kwargs = {"multi_class": "ovo", "average": "macro"}
-            
-            preds_all.append(preds.cpu().numpy())
+            preds_all.append(np.array([pred]))
             probs_all.append(probs.cpu().numpy())
             targets_all.append(label.numpy())
 
-            # 4. For visualization
-            slide_per_task.append(slide_embed)
-            if dict_convert_class[task_id][int(label)] not in slide_per_class:
-                slide_per_class[dict_convert_class[task_id][int(label)]] = [slide_embed]
-            else:
-                slide_per_class[dict_convert_class[task_id][int(label)]].append(slide_embed)
+            g_label = seq_dataset.task_to_global_class[task_id].get(int(label), -1)
+            g_pred  = seq_dataset.task_to_global_class[task_id].get(pred, -1)
+            convert_targets_all.append(np.array([g_label]))
+            convert_preds_all.append(np.array([g_pred]))
 
-            convert_label = torch.Tensor([dict_class[int(label[0])]])
+    return _pack_results(
+        preds_all, targets_all, probs_all,
+        convert_preds_all, convert_targets_all, times,
+    )
 
-            try:
-                convert_pred = torch.Tensor([dict_class[int(preds[0])]])
-            except:
-                convert_pred = torch.Tensor([4])
 
-            convert_targets_all.append(convert_label)
-            convert_preds_all.append(convert_pred)
-        
-        preds_all = np.concatenate(preds_all)
-        try:
-            probs_all = np.concatenate(probs_all)
-        except:
-            # Padding, just in case
-            probs_all = pad_numpy_arrays(probs_all)
+def eval_task_naive(
+    test_loader,
+    task_id: int,
+    model: CustomSequential,
+    all_class_embeddings: torch.Tensor,
+    device,
+    task_to_global_class: dict,
+    task_class_ranges: dict,
+) -> tuple:
+    """
+    Naive inference:
+      y_pred = argmax(Z @ All_Class_Embeddings.T)
 
-        targets_all = np.concatenate(targets_all)
+    all_class_embeddings: shape [EMBED_DIM, 13] — toàn bộ class embeddings.
+    Predict global class 0..12, sau đó map về local class của task_id
+    để tính metrics đúng.
+    """
+    preds_all           = []
+    probs_all           = []
+    targets_all         = []
+    convert_preds_all   = []
+    convert_targets_all = []
+    times               = []
 
-        convert_preds_all = np.concatenate(convert_preds_all)
-        convert_targets_all = np.concatenate(convert_targets_all)
+    ps = torch.tensor(TITAN_PS_ARG).int().to(device)
 
-    eval_metrics = get_eval_metrics(targets_all, preds_all, probs_all, roc_kwargs=roc_kwargs, prefix=prefix)
+    # Ánh xạ ngược: global class → local class của task_id
+    global_to_local = {v: k for k, v in task_to_global_class[task_id].items()}
 
-    return eval_metrics, preds_all, targets_all, slide_per_task, slide_per_class, probs_all, convert_preds_all, convert_targets_all, sum(times)
+    # Class index range của task_id trong 13-class space
+    start, end      = task_class_ranges[task_id]
+
+    with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+        for features, coords, label in tqdm(test_loader, leave=False):
+            features = features.to(device)
+            coords   = coords.long().to(device)
+            idx      = torch.randperm(features.shape[0])[:K_PATCHES]
+            features, coords = features[idx], coords[idx]
+
+            t0 = time.time()
+
+            # Naive: dot-product với toàn bộ 13 class embeddings
+            slide_embed  = model.backbone(features, coords, ps)
+            logits_global = (slide_embed @ all_class_embeddings).float()  # [1, 13]
+            global_pred   = int(logits_global.argmax(1))
+            times.append(time.time() - t0)
+
+            # Map global pred → local pred của task_id
+            # Nếu model predict class của task khác → local pred = -1 (sai)
+            local_pred = global_to_local.get(global_pred, -1)
+
+            # Probs: lấy slice của task_id trong 13-class softmax
+            probs_global = nn.functional.softmax(logits_global, dim=1)
+            probs_local  = probs_global[:, start:end + 1]
+
+            preds_all.append(np.array([local_pred if local_pred >= 0 else 0]))
+            probs_all.append(probs_local.cpu().numpy())
+            targets_all.append(label.numpy())
+
+            g_label = task_to_global_class[task_id].get(int(label), -1)
+            convert_targets_all.append(np.array([g_label]))
+            convert_preds_all.append(np.array([global_pred]))
+
+    return _pack_results(
+        preds_all, targets_all, probs_all,
+        convert_preds_all, convert_targets_all, times,
+    )
+
+
+def _pack_results(
+    preds_all, targets_all, probs_all,
+    convert_preds_all, convert_targets_all, times,
+) -> tuple:
+    """Gộp list → numpy array và tính metrics. Dùng chung cho cả 2 modes."""
+    preds_arr   = np.concatenate(preds_all)
+    targets_arr = np.concatenate(targets_all)
+    try:
+        probs_arr = np.concatenate(probs_all)
+    except ValueError:
+        probs_arr = pad_numpy_arrays(probs_all)
+
+    metrics = get_eval_metrics(
+        targets_arr, preds_arr, probs_arr,
+        roc_kwargs={"multi_class": "ovo", "average": "macro"},
+        prefix="",
+    )
+    return (
+        metrics, preds_arr, targets_arr, probs_arr,
+        np.concatenate(convert_preds_all),
+        np.concatenate(convert_targets_all),
+        sum(times),
+    )
+
+
+def build_class_embeddings(device) -> torch.Tensor:
+    """
+    Build all_class_embeddings [EMBED_DIM, 13] từ TITAN text encoder.
+    Dùng cho Naive mode.
+    """
+    print("Building all_class_embeddings for Naive mode ...")
+    titan = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
+    titan = titan.to(device)
+
+    _, templates = brca_prompts()
+    all_prompts  = []
+    for fn in [brca_prompts, rcc_prompts, nsclc_prompts,
+               esca_prompts, tgct_prompts, cesc_prompts]:
+        class_prompts, _ = fn()
+        all_prompts.extend(class_prompts)
+
+    with torch.autocast("cuda", torch.float16), torch.inference_mode():
+        classifier = titan.zero_shot_classifier(
+            all_prompts, templates, device=str(device)
+        )  # shape [EMBED_DIM, 13]
+
+    del titan
+    torch.cuda.empty_cache()
+    return classifier.to(device)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     torch.multiprocessing.set_sharing_strategy("file_system")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    seed_torch(device, 0)
 
-    parser = argparse.ArgumentParser(description="Finetune TITAN")
-    
-    parser.add_argument("--name", default=None, type=str)
-    parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--num_epochs", type=int, default=10)
-    parser.add_argument("--lr", type=float, default=1e-5)
-    parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--save_dir", type=str, default="./logs")
-    parser.add_argument("--merge_model_path", type=str, default="/path/to/merged/checkpoints")
-
+    parser = argparse.ArgumentParser(description="Class-IL evaluation")
+    parser.add_argument("--config",           type=str, default="configs/default.yaml")
+    parser.add_argument("--save_dir",         type=str, required=True,
+                        help="Root dir chứa finetuned checkpoints")
+    parser.add_argument("--merge_model_path", type=str, required=True,
+                        help="Root dir chứa merged checkpoints: {path}/fold_{id}/merged_final.pth")
+    parser.add_argument("--mode",             type=str, default="tcp",
+                        choices=["tcp", "naive"],
+                        help="tcp (default): TCP inference | naive: direct class inference")
     args = parser.parse_args()
 
-    # A little bit hard code here for 6 tasks    
-    num_tasks = 6
-    num_classes = [2, 3, 2, 2, 2, 2]
-    dict_convert_class = {
-        0: {0:0, 1:1},
-        1: {0:2, 1:3, 2:4},
-        2: {0:5, 1:6},
-        3: {0:7, 1:8},
-        4: {0:9, 1:10},
-        5: {0:11, 1:12}
-    }
-    seq_dataset = Sequential_Generic_MIL_Dataset()
+    cfg    = OmegaConf.load(args.config)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    seed_torch(device, cfg.training.seed)
 
-    # load model from huggingface
-    base_model = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)    
+    num_tasks    = cfg.training.num_tasks
+    seq_dataset  = Sequential_Generic_MIL_Dataset(cfg)
+    num_classes  = seq_dataset.num_classes
+
+    # Load embeddings tuỳ theo mode
+    if args.mode == "tcp":
+        task_prompts = torch.load(PROJECT_ROOT / "task_prompts.pt").to(device)
+        if getattr(cfg.dataset, 'order', 'forward') == 'reverse':
+            task_prompts = task_prompts.flip(0)
+        all_class_embeddings = None
+    else:
+        task_prompts        = None
+        all_class_embeddings = build_class_embeddings(device)
+
+    print("Loading TITAN base model ...")
+    base_model = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
     base_model = base_model.to(device)
-    overall_accs = []
-    task_prompts = torch.load(PROJECT_ROOT / "task_prompts.pt")
 
-    overall_accs = []
-    overall_baccs = []
-    overall_aucs = []
-    overall_recalls = []
-    overall_precisions = []
-    overall_macro_f1s = []
+    overall_accs         = []
+    overall_baccs        = []
+    overall_macro_f1s    = []
     overall_weighted_f1s = []
+    overall_recalls      = []
+    overall_precisions   = []
+    overall_aucs         = []
+    overall_times        = []
+    all_acc_per_task     = []
 
-    overall_time_all_folds = []
-    for fold_id in tqdm(range(0, 10)):
-        num_total = 0.
-        num_correct = 0.
-        fold = "fold_" + str(fold_id)
-        merge_model_path = str(args.merge_model_path)
-        print(merge_model_path)
+    for fold_id in tqdm(range(cfg.training.num_folds), desc="Folds"):
+        fold = f"fold_{fold_id}"
+
+        merge_model_path = Path(args.merge_model_path) / fold / "merged_final.pth"
+        print(f"Loading: {merge_model_path}")
+        base_model.vision_encoder.load_state_dict(
+            torch.load(str(merge_model_path), map_location="cpu")
+        )
+        model = CustomSequential(base_model, nn.Identity()).eval()
+
         task_model_paths = [
-            f"{args.save_dir}" + fold_id + "/ckpts_outputs_finetuning_task_" + str(task_id) + ".pt" 
-                for task_id in range(0, args.num_tasks)
+            str(Path(args.save_dir) / fold / f"task_{t}.pt")
+            for t in range(num_tasks)
         ]
 
-        # Load all MLPs just in case to use
-        mlp_task_weights = [torch.load(task_model_paths[task_id]) for task_id in range(num_tasks)]
-        for i in range(len(mlp_task_weights)):
-            mlp_task_weights[i] = {k.split('mlp.')[-1]:mlp_task_weights[i][k] for k in list(mlp_task_weights[i].keys())[-2:]}
-        
-        merge_mlp_data = dict()
-        merge_mlp_data['weight'] = torch.cat([data['weight'] for data in mlp_task_weights])
-        merge_mlp_data['bias'] = torch.cat([data['bias'] for data in mlp_task_weights])
-        
-        # Load base model            
-        mlp = nn.Identity()
-        model = CustomSequential(base_model, mlp)
-        model.eval()
-
-        # Load test dataset for all tasks
-        dict_slide_per_task = {i:[] for i in range(num_tasks)}
-        dict_slide_per_class = {i:[] for i in range(0, sum(num_classes))}
-
-        acc_per_task = {}
-        
-        overall_time = 0.
-
-        all_acc_per_task = []
-        all_baccs = []
-        all_predictions = []
-        all_labels = []
-        all_logits = []
-        all_probs = []
-        all_baccs = []
-        all_accs = []
-        aucs = []
-
-        throughputs = []
-        per_task_epoch_times = []
+        num_correct   = 0.0
+        num_total     = 0.0
+        all_baccs     = []
+        all_accs      = []
+        all_aucs      = []
+        all_preds_g   = []
+        all_targets_g = []
+        acc_per_task  = {}
+        fold_time     = 0.0
 
         for task_id in range(num_tasks):
-            # print("TASK", task_id)
             _, _, test_loader = seq_dataset.get_data_loaders(fold_id, task_id)
-            start = time.time()
-            results, preds_all, targets_all, slide_per_task, slide_per_class, probs_all, convert_preds_all, convert_targets_all, sum_time = eval(test_loader, task_id, model, dict_convert_class[task_id], num_classes[:num_tasks], device, task_prompts[:num_tasks], task_model_paths[:num_tasks], merge_mlp_data, prefix="", save_location=None)
-            end = time.time()
-            throughputs.append(targets_all.shape[0] / sum_time)
-            per_task_epoch_times.append(sum_time)
-            
+
+            if args.mode == "tcp":
+                result = eval_task_tcp(
+                    test_loader, task_id, model, num_classes,
+                    task_prompts, task_model_paths, device,
+                )
+            else:
+                result = eval_task_naive(
+                    test_loader, task_id, model,
+                    all_class_embeddings, device,
+                    task_to_global_class=seq_dataset.task_to_global_class,
+                    task_class_ranges=seq_dataset.task_class_ranges,
+                )
+
+            results, preds_all, targets_all, probs_all, \
+                conv_preds, conv_targets, task_time = result
+
             num_correct += sum(preds_all == targets_all)
-            num_total += len(test_loader)
-            # print(results)
-            acc_per_task[task_id] = results['/acc']
+            num_total   += len(test_loader)
+            fold_time   += task_time / len(test_loader)
 
-            dict_slide_per_task[task_id].extend(slide_per_task)
-            for class_id in slide_per_class:
-                dict_slide_per_class[class_id].extend(slide_per_class[class_id])
-        
-            overall_time_per_task = sum_time / len(test_loader)
-            overall_time += overall_time_per_task
-
-            all_predictions.append(convert_preds_all)
-            all_labels.append(convert_targets_all)
-
-            bacc = balanced_accuracy_score(targets_all, preds_all)
-            all_baccs.append(bacc)
+            acc_per_task[task_id] = results["/acc"]
+            all_baccs.append(balanced_accuracy_score(targets_all, preds_all))
             all_accs.append(sum(preds_all == targets_all) / len(test_loader))
+            all_preds_g.append(conv_preds)
+            all_targets_g.append(conv_targets)
 
-            for i in range(len(dict_convert_class[task_id])):
-                # Binarize the true labels for the current class (one-vs-rest)
-                y_true_binary = (targets_all == i).astype(int)
-                # Get the predicted probabilities for the current class
-                if len(probs_all.shape) == 3:
-                    probs_all = probs_all.squeeze(1)
+            if len(probs_all.shape) == 3:
+                probs_all = probs_all.squeeze(1)
+            for i in range(num_classes[task_id]):
+                all_aucs.append(
+                    roc_auc_score((targets_all == i).astype(int), probs_all[:, i])
+                )
 
-                y_score_class_i = probs_all[:, i]
+        all_preds_g   = np.concatenate(all_preds_g)
+        all_targets_g = np.concatenate(all_targets_g)
 
-                # Calculate ROC AUC for the current class
-                auc_score = roc_auc_score(y_true_binary, y_score_class_i)
-                aucs.append(auc_score)
-        
-        all_labels, all_predictions = np.concatenate(all_labels), np.concatenate(all_predictions)
-        bacc = np.mean(all_baccs)
-        acc_new = np.mean(all_accs)
-        precision_per_class = precision_score(all_labels, all_predictions, average=None)
-        recall_per_class = recall_score(all_labels, all_predictions, average=None)
-        weighted_f1_score = f1_score(all_labels, all_predictions, average="weighted")
-        macro_f1_score = f1_score(all_labels, all_predictions, average="macro")
-
-        overall_baccs.append(bacc)
-        overall_aucs.append(np.array(aucs))
-        overall_recalls.append(recall_per_class)
-        overall_precisions.append(precision_per_class)
-        overall_macro_f1s.append(macro_f1_score)
-        overall_weighted_f1s.append(weighted_f1_score)
-
-        overall_time = overall_time / num_tasks
-        overall_time_all_folds.append(overall_time)
-        # overall_acc = num_correct / num_total
-        overall_accs.append(acc_new)
+        overall_accs.append(np.mean(all_accs))
+        overall_baccs.append(np.mean(all_baccs))
+        overall_macro_f1s.append(f1_score(all_targets_g, all_preds_g, average="macro"))
+        overall_weighted_f1s.append(f1_score(all_targets_g, all_preds_g, average="weighted"))
+        overall_recalls.append(recall_score(all_targets_g, all_preds_g, average=None))
+        overall_precisions.append(precision_score(all_targets_g, all_preds_g, average=None))
+        overall_aucs.append(np.array(all_aucs))
+        overall_times.append(fold_time / num_tasks)
         all_acc_per_task.append(acc_per_task)
 
-        print("overall_acc", acc_new)
-        print("overall_time", overall_time)
-    
-    print([float(acc) for acc in overall_accs])
-    print("Accuracy:", np.mean(overall_accs), "(", np.std(overall_accs), ")")
-    print("Balanced Accuracy:", np.mean(overall_baccs), "(", np.std(overall_baccs), ")")
-    print("Macro F1:", np.mean(overall_macro_f1s), "(", np.std(overall_macro_f1s), ")")
-    print("Weighted F1:", np.mean(overall_weighted_f1s), "(", np.std(overall_weighted_f1s), ")")
+        print(f"[Fold {fold_id}] Acc={np.mean(all_accs)*100:.4f}% "
+              f"BAcc={np.mean(all_baccs)*100:.4f}%")
 
-    print("Recall:")
-    for value, std in zip(list(np.mean(np.stack(overall_recalls), axis=0)), list(np.std(np.stack(overall_recalls), axis=0))):
-        print(value, "(", std, ")")
-    
-    print("Precision:")
-    for value, std in zip(list(np.mean(np.stack(overall_precisions), axis=0)), list(np.std(np.stack(overall_precisions), axis=0))):
-        print(value, "(", std, ")")
-    
-    print("AUC:")
-    for value, std in zip(list(np.mean(np.stack(overall_aucs), axis=0)), list(np.std(np.stack(overall_aucs), axis=0))):
-        print(value, "(", std, ")")
+    mode_label = "TCP" if args.mode == "tcp" else "Naive"
+    print(f"\n===== Class-IL ({mode_label}) Results =====")
+    print(f"Accuracy:        {np.mean(overall_accs)*100:.4f}% ({np.std(overall_accs)*100:.4f}%)")
+    print(f"Balanced Acc:    {np.mean(overall_baccs)*100:.4f}% ({np.std(overall_baccs)*100:.4f}%)")
+    print(f"Macro F1:        {np.mean(overall_macro_f1s)*100:.4f}% ({np.std(overall_macro_f1s)*100:.4f}%)")
+    print(f"Weighted F1:     {np.mean(overall_weighted_f1s)*100:.4f}% ({np.std(overall_weighted_f1s)*100:.4f}%)")
+    print(f"Inference time:  {np.mean(overall_times):.3f}s ({np.std(overall_times):.3f}s)")
 
-    print("Over time all folds:", np.mean(overall_time_all_folds), "(", np.std(overall_time_all_folds), ")")
-    print("Acc per task:")
-    
-    accs = {task_id:list() for task_id in range(num_tasks)}
-    for i in range(len(all_acc_per_task)):
-        for task_id in range(num_tasks):
-            accs[task_id].append(all_acc_per_task[i][task_id])
-    
-    for task_id in range(len(accs)):
-        print("Acc ", task_id, np.mean(accs[task_id]), np.std(accs[task_id]))
+    print("\nRecall per class:")
+    for v, s in zip(np.mean(np.stack(overall_recalls), axis=0),
+                    np.std(np.stack(overall_recalls), axis=0)):
+        print(f"  {v*100:.4f}% ({s*100:.4f}%)")
+
+    print("\nPrecision per class:")
+    for v, s in zip(np.mean(np.stack(overall_precisions), axis=0),
+                    np.std(np.stack(overall_precisions), axis=0)):
+        print(f"  {v*100:.4f}% ({s*100:.4f}%)")
+
+    print("\nAUC per class:")
+    for v, s in zip(np.mean(np.stack(overall_aucs), axis=0),
+                    np.std(np.stack(overall_aucs), axis=0)):
+        print(f"  {v*100:.4f}% ({s*100:.4f}%)")
+
+    print("\nAcc per task:")
+    accs = {t: [] for t in range(num_tasks)}
+    for fold_acc in all_acc_per_task:
+        for t in range(num_tasks):
+            accs[t].append(fold_acc[t])
+    for t in range(num_tasks):
+        print(f"  Task {t}: {np.mean(accs[t])*100:.4f}% ({np.std(accs[t])*100:.4f}%)")

@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=mergeslide
-#SBATCH --output=/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/logs/mergeslide_%j.out
-#SBATCH --error=/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/logs/mergeslide_%j.err
+#SBATCH --job-name=finetune
+#SBATCH --output=/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/logs/finetune_%j.out
+#SBATCH --error=/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/logs/finetune_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
@@ -89,4 +89,4 @@ echo "[INFO] launching training at $(date)"
 
 cd /datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA
 
-python -u train.py
+python -u train.py --config configs/default.yaml

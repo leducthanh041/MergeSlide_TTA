@@ -1,0 +1,79 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local experiment and training outputs
+/logs/
+/logs*/
+/runs/
+/outputs/
+/results/
+/checkpoints/
+/wandb/
+
+# Generated model artifacts from training / merging
+ckpts_outputs_finetuning_task_*.pt
+merged_weight_opcm_random_sampling_*.pth
+
+# Local archives and temporary files
+*.tmp
+*.temp
+*.bak
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# Notebook-generated local artifacts
+/notebooks/__pycache__/
+/notebooks/*.bak*
+/notebooks/*.tmp
+/notebooks/*.temp
+/notebooks/*.zip
+/notebooks/*.tar
+/notebooks/*.tar.gz
+/notebooks/*.tgz
+/notebooks/*_manifest.csv
+/notebooks/*_skipped*.csv
+/notebooks/*_cleanup_*.csv
+/notebooks/slurm-*.out
+
+ASlide
+PrePATH
+log
+.codex
+TRIDENT
+
+cleanup_rcc_corrupt_trident_outputs.py
+clear_folder.py
+convert_trident_h5_to_pt.py
+create_trident_mpp_csv.py
+flatten_wsi_dataset.py
+
+BRCA.sh.bak_invalid_utf8
+CESC.sh.bak_pre_mpp_filter
+zip_tcga_datasets.py
+
+.agents/
+AGENTS.md
+configs/.nfs00000000153fec1c00000397
+datasets_py_explanation_vi.md

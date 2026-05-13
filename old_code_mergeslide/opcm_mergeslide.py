@@ -101,7 +101,7 @@ if __name__ == "__main__":
     for fold_id in range(0, 10):
         fold_id = "fold_" + str(fold_id)
         task_models = [
-            f"{args.src_finedtuned_checkpoints}" + fold_id + "/ckpts_outputs_finetuning_task_" + str(task_id) + ".pt" 
+            f"{args.src_finedtuned_checkpoints}" + fold_id + "/task_" + str(task_id) + ".pt" 
                 for task_id in range(0, args.num_tasks)
         ]
         base_weight = base_model.vision_encoder.state_dict()

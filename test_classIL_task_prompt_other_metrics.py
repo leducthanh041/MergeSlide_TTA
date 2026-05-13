@@ -1,326 +1,348 @@
+# test_classIL_task_prompt_other_metrics.py
+"""
+Class-IL evaluation — BWT, Forgetting, mACC — hỗ trợ TCP và Naive.
+
+Modes:
+    tcp   (default): Task-to-Class Prompt-Aligned inference
+    naive          : y_pred = argmax(Z @ All_Class_Embeddings.T)
+
+Usage:
+    python test_classIL_task_prompt_other_metrics.py \
+        --save_dir /path/to/finetuned_checkpoints \
+        --merge_model_path /path/to/merged/checkpoints \
+        --mode tcp      # hoặc --mode naive
+
+Cấu trúc checkpoint kỳ vọng:
+    Finetuned    : {save_dir}/fold_{id}/task_{t}.pt
+    Intermediate : {merge_model_path}/fold_{id}/merged_task_{seq_task}.pth
+    Final        : {merge_model_path}/fold_{id}/merged_final.pth
+"""
 import argparse
-import os
-import pickle
-import random
 from pathlib import Path
+
 import numpy as np
-import pandas as pd
 import torch
-torch.manual_seed(42)  # Set seed
 import torch.nn as nn
-import torch.nn.functional as F
-import yaml
-from sklearn.metrics import balanced_accuracy_score
+from omegaconf import OmegaConf
 from tqdm import tqdm
 from transformers import AutoModel
-import torch.nn.functional as F
-from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
-from mergeslide_tta.prompts_zeroshot import (
-    brca_prompts,
-    cesc_prompts,
-    esca_prompts,
-    nsclc_prompts,
-    rcc_prompts,
-    tgct_prompts,
+
+from mergeslide_tta.constants import (
+    EMBED_DIM, K_PATCHES, NUM_CLASSES, NUM_TASKS,
+    TASK_CLASS_RANGES, TASK_TO_GLOBAL_CLASS, TITAN_PS_ARG,
 )
-from mergeslide_tta.utils import bootstrap, get_eval_metrics, seed_torch
+from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
+from mergeslide_tta.metrics import backward_transfer, forgetting, pad_numpy_arrays
+from mergeslide_tta.model import CustomSequential
+from mergeslide_tta.prompts_zeroshot import (
+    brca_prompts, rcc_prompts, nsclc_prompts,
+    esca_prompts, tgct_prompts, cesc_prompts,
+)
+from mergeslide_tta.utils import get_eval_metrics, seed_torch
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
-def pad_numpy_arrays(arrays, pad_value=0.0):
+
+# ---------------------------------------------------------------------------
+# Inference functions
+# ---------------------------------------------------------------------------
+
+def eval_task_tcp(
+    test_loader,
+    model: CustomSequential,
+    num_classes: list,
+    task_prompts: torch.Tensor,
+    task_model_paths: list,
+    device,
+) -> tuple:
     """
-    Pads a list of NumPy arrays with varying shapes to the same shape and stacks them.
-
-    Args:
-        arrays (List[np.ndarray]): List of NumPy arrays with varying shapes.
-        pad_value (float): Value to use for padding.
-
-    Returns:
-        np.ndarray: A stacked NumPy array of shape (len(arrays), *max_shape)
+    TCP inference:
+      1. t_hat = argmax(Z @ Task_Embeddings.T)
+      2. y_pred = argmax(Z @ Class_Embeddings[t_hat].T)  via MLP head
+    Returns (metrics, preds_all, targets_all).
     """
-    # Step 1: Normalize dimensions
-    max_dim = max(arr.ndim for arr in arrays)
-    arrays = [arr.reshape((1,) * (max_dim - arr.ndim) + arr.shape) for arr in arrays]
-
-    # Step 2: Compute max shape
-    max_shape = np.max([arr.shape for arr in arrays], axis=0)
-
-    # Step 3: Pad each array
-    padded_arrays = []
-    for arr in arrays:
-        pad_width = [(0, max_dim_i - arr.shape[i]) for i, max_dim_i in enumerate(max_shape)]
-        padded = np.pad(arr, pad_width=pad_width, mode='constant', constant_values=pad_value)
-        padded_arrays.append(padded)
-
-    # Step 4: Stack
-    return np.stack(padded_arrays)
-
-device = 'cuda:0'
-titan_model = AutoModel.from_pretrained('MahmoodLab/TITAN', trust_remote_code=True)
-titan_model = titan_model.to(device)
-
-_, TEMPLATES = brca_prompts()
-CLASS_PROMPTS = []
-
-print("Getting Prompt Prototypes ...")
-for prompts in [brca_prompts, rcc_prompts, nsclc_prompts, esca_prompts, tgct_prompts, cesc_prompts]:
-    class_prompts, _ = prompts()
-    CLASS_PROMPTS.extend(class_prompts)
-
-with torch.autocast('cuda', torch.float16), torch.inference_mode():
-    classifier = titan_model.zero_shot_classifier(CLASS_PROMPTS, TEMPLATES, device=device)
-
-dict_classes = {
-    0: [0, 1],
-    1: [2, 4],
-    2: [5, 6],
-    3: [7, 8],
-    4: [9, 10],
-    5: [11, 12]
-}
-
-"""
-Script to finetune TITAN on a dummy dataset. Dataset class needs to be adapted to a custom dataset and task.
-"""
-
-MAX_NUM_PATCHES = 10000
-
-class CustomSequential(nn.Module):
-    def __init__(self, model, mlp):
-        super(CustomSequential, self).__init__()
-        self.backbone = model.vision_encoder
-        self.mlp = mlp
-
-    def forward(self, features, coords, ps):
-        x = self.backbone(features, coords, ps)
-        x = self.mlp(x)
-        return x
-
-def create_mlp(in_dim=None, hid_dims=[], act=nn.ReLU(), dropout=0.0, out_dim=None, end_with_fc=True):
-    layers = []
-    if len(hid_dims) > 0:
-        for hid_dim in hid_dims:
-            layers.append(nn.Linear(in_dim, hid_dim))
-            layers.append(act)
-            layers.append(nn.Dropout(dropout))
-            in_dim = hid_dim
-    layers.append(nn.Linear(in_dim, out_dim))
-    if not end_with_fc:
-        layers.append(act)
-        layers.append(nn.Dropout(dropout))
-    mlp = nn.Sequential(*layers)
-    return mlp
-
-
-def cosine_lr(optimizer, base_lr, warmup_length, steps):
-    """Copied from https://github.com/mlfoundations/open_clip/blob/main/src/open_clip_train/scheduler.py
-    """
-    def _warmup_lr(base_lr, warmup_length, step):
-        return base_lr * (step + 1) / warmup_length
-    
-    def _assign_learning_rate(optimizer, new_lr):
-        for param_group in optimizer.param_groups:
-            if "lr_scale" in param_group:
-                param_group["lr"] = new_lr * param_group["lr_scale"]
-            else:
-                param_group["lr"] = new_lr
-    
-    def _lr_adjuster(step):
-        if step < warmup_length:
-            lr = _warmup_lr(base_lr, warmup_length, step)
-        else:
-            e = step - warmup_length
-            es = steps - warmup_length
-            lr = 0.5 * (1 + np.cos(np.pi * e / es)) * base_lr
-        _assign_learning_rate(optimizer, lr)
-        return lr
-
-    return _lr_adjuster
-
-class EarlyStopping:
-    def __init__(self, patience=5, min_delta=0.0, verbose=False):
-        """
-        Args:
-            patience (int): How long to wait after the last improvement.
-            min_delta (float): Minimum change to qualify as an improvement.
-            verbose (bool): If True, prints a message for each improvement.
-        """
-        self.patience = patience
-        self.min_delta = min_delta
-        self.verbose = verbose
-        self.counter = 0
-        self.best_score = None
-        self.early_stop = False
-        self.val_loss_min = float("inf")
-        self.best_model_weights = None
-
-    def __call__(self, val_loss, model):
-        # Check if the new loss is an improvement
-        if self.best_score is None:
-            self.best_score = val_loss
-            self.best_model_weights = model.state_dict()
-        elif val_loss > self.best_score - self.min_delta:
-            self.counter += 1
-            if self.verbose:
-                print(f"EarlyStopping counter: {self.counter} out of {self.patience}")
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:
-            self.best_score = val_loss
-            self.counter = 0
-            self.best_model_weights = model.state_dict()
-
-def forgetting(results):
-    n_tasks = len(results)
-    li = list()
-    for i in range(n_tasks - 1):
-        results[i] += [0.0] * (n_tasks - len(results[i]))
-    np_res = np.array(results)
-    maxx = np.max(np_res, axis=0)
-    for i in range(n_tasks - 1):
-        li.append(maxx[i] - results[-1][i])
-
-    return np.mean(li)
-
-def backward_transfer(results):
-    n_tasks = len(results)
-    li = list()
-    for i in range(n_tasks - 1):
-        li.append(results[-1][i] - results[i][i])
-
-    return np.mean(li)
-
-def eval(test_loader, model, num_classes, device, task_prompts, task_model_paths, merge_mlp_data, prefix, save_location, **kwargs):
-    preds_all = []
-    probs_all = []
+    preds_all   = []
+    probs_all   = []
     targets_all = []
-    K = 400
-    dict_convert_class = {0: 0, 1: 1, 2: 0, 3: 1, 4: 2, 5: 0, 6:1, 7:0, 8:1, 9:0, 10:1, 11:0, 12:1}
+
+    ps = torch.tensor(TITAN_PS_ARG).int().to(device)
+
+    task_weights = []
+    for p in task_model_paths:
+        state = torch.load(p, map_location="cpu")
+        task_weights.append(
+            {k.split("mlp.")[-1]: state[k] for k in list(state.keys())[-2:]}
+        )
+
     with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
-        for features, coords, label in tqdm(test_loader):
+        for features, coords, label in tqdm(test_loader, leave=False):
             features = features.to(device)
-            coords = coords.long().to(device)
+            coords   = coords.long().to(device)
+            idx      = torch.randperm(features.shape[0])[:K_PATCHES]
+            features, coords = features[idx], coords[idx]
 
-            indices = torch.randperm(features.shape[0])[:K]
+            slide_embed  = model.backbone(features, coords, ps)
+            pred_task_id = int(torch.argmax(slide_embed @ task_prompts.T))
 
-            features = features[indices, :]
-            coords = coords[indices, :]
+            mlp = nn.Linear(EMBED_DIM, num_classes[pred_task_id]).to(device)
+            mlp.load_state_dict(task_weights[pred_task_id])
+            logits = mlp(slide_embed).float()
+            pred   = int(logits.argmax(1))
 
-            slide_embed = model.backbone(features, coords, torch.tensor(1024).int().to(device), **kwargs)
-            predicted_task_id = torch.argmax(slide_embed @ task_prompts.T)
-
-            mlp = nn.Linear(768, num_classes[predicted_task_id]).to(device)
-            task_weight = torch.load(task_model_paths[int(predicted_task_id)])
-            mlp.load_state_dict({k.split('mlp.')[-1]:task_weight[k] for k in list(task_weight.keys())[-2:]})
-            logits = mlp(slide_embed)
-            logits = logits.float()
-            preds = logits.argmax(1)
-                
             probs = nn.functional.softmax(logits, dim=1)
-            roc_kwargs = {"multi_class": "ovo", "average": "macro"}
-            
-            preds_all.append(preds.cpu().numpy())
+            preds_all.append(np.array([pred]))
             probs_all.append(probs.cpu().numpy())
             targets_all.append(label.numpy())
 
-        preds_all = np.concatenate(preds_all)
-        try:
-            probs_all = np.concatenate(probs_all)
-        except:
-            probs_all = pad_numpy_arrays(probs_all)
-        targets_all = np.concatenate(targets_all)
+    return _pack_results(preds_all, targets_all, probs_all)
 
-    eval_metrics = get_eval_metrics(targets_all, preds_all, probs_all, roc_kwargs=roc_kwargs, prefix=prefix)
 
-    return eval_metrics, preds_all, targets_all
+def eval_task_naive(
+    test_loader,
+    task_id: int,
+    model: CustomSequential,
+    all_class_embeddings: torch.Tensor,
+    device,
+    task_to_global_class: dict,
+    task_class_ranges: dict, 
+    max_classes: int = None,
+) -> tuple:
+    """
+    Naive inference:
+      y_pred = argmax(Z @ All_Class_Embeddings[:, :max_classes].T)
+
+    max_classes: giới hạn class space về số class đã học,
+                 tránh naive compete với class chưa được train.
+    """
+    preds_all   = []
+    probs_all   = []
+    targets_all = []
+
+    ps = torch.tensor(TITAN_PS_ARG).int().to(device)
+
+    global_to_local = {v: k for k, v in task_to_global_class[task_id].items()}
+    start, end      = task_class_ranges[task_id]
+
+    # Slice embeddings về không gian class đã học
+    effective_embeddings = (
+        all_class_embeddings[:, :max_classes]
+        if max_classes is not None
+        else all_class_embeddings
+    )
+
+    with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
+        for features, coords, label in tqdm(test_loader, leave=False):
+            features = features.to(device)
+            coords   = coords.long().to(device)
+            idx      = torch.randperm(features.shape[0])[:K_PATCHES]
+            features, coords = features[idx], coords[idx]
+
+            slide_embed   = model.backbone(features, coords, ps)
+            logits_global = (slide_embed @ effective_embeddings).float()
+            global_pred   = int(logits_global.argmax(1))
+            local_pred    = global_to_local.get(global_pred, 0)
+
+            probs_global = nn.functional.softmax(logits_global, dim=1)
+            probs_local  = probs_global[:, start:end + 1]
+
+            preds_all.append(np.array([local_pred]))
+            probs_all.append(probs_local.cpu().numpy())
+            targets_all.append(label.numpy())
+
+    return _pack_results(preds_all, targets_all, probs_all)
+
+def _pack_results(preds_all, targets_all, probs_all) -> tuple:
+    """Gộp list → numpy và tính metrics. Dùng chung cho cả 2 modes."""
+    preds_arr   = np.concatenate(preds_all)
+    targets_arr = np.concatenate(targets_all)
+    try:
+        probs_arr = np.concatenate(probs_all)
+    except ValueError:
+        probs_arr = pad_numpy_arrays(probs_all)
+
+    metrics = get_eval_metrics(
+        targets_arr, preds_arr, probs_arr,
+        roc_kwargs={"multi_class": "ovo", "average": "macro"},
+        prefix="",
+    )
+    return metrics, preds_arr, targets_arr
+
+
+def build_class_embeddings(device) -> torch.Tensor:
+    """
+    Build all_class_embeddings [EMBED_DIM, 13] từ TITAN text encoder.
+    Dùng cho Naive mode.
+    """
+    print("Building all_class_embeddings for Naive mode ...")
+    titan = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
+    titan = titan.to(device)
+
+    _, templates = brca_prompts()
+    all_prompts  = []
+    for fn in [brca_prompts, rcc_prompts, nsclc_prompts,
+               esca_prompts, tgct_prompts, cesc_prompts]:
+        class_prompts, _ = fn()
+        all_prompts.extend(class_prompts)
+
+    with torch.autocast("cuda", torch.float16), torch.inference_mode():
+        classifier = titan.zero_shot_classifier(
+            all_prompts, templates, device=str(device)
+        )
+
+    del titan
+    torch.cuda.empty_cache()
+    return classifier.to(device)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     torch.multiprocessing.set_sharing_strategy("file_system")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    parser = argparse.ArgumentParser(description="Finetune TITAN")
-    
-    parser.add_argument("--name", default=None, type=str)
-    parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--num_epochs", type=int, default=10)
-    parser.add_argument("--lr", type=float, default=1e-5)
-    parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--save_dir", type=str, default="./logs")
-    parser.add_argument("--merge_model_path", type=str, default="/path/to/merged/checkpoints")
-    
+
+    parser = argparse.ArgumentParser(description="Class-IL BWT/FGT evaluation")
+    parser.add_argument("--config",           type=str, default="configs/default.yaml")
+    parser.add_argument("--save_dir",         type=str, required=True,
+                        help="Root dir chứa finetuned checkpoints")
+    parser.add_argument("--merge_model_path", type=str, required=True,
+                        help="Root dir chứa merged checkpoints")
+    parser.add_argument("--mode",             type=str, default="tcp",
+                        choices=["tcp", "naive"],
+                        help="tcp (default): TCP inference | naive: direct class inference")
     args = parser.parse_args()
-    
-    num_tasks = 6
-    num_classes = [2, 3, 2, 2, 2, 2]
-    seq_dataset = Sequential_Generic_MIL_Dataset()
-    overall_accs = []
-    list_num_tasks = [1, 2, 3, 4, 5, 6]
-    mACCs_all_folds = []
-    fgt_all_folds = []
-    bwt_all_folds = []
+
+    cfg    = OmegaConf.load(args.config)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    seed_torch(device, cfg.training.seed)
+
+    num_tasks   = cfg.training.num_tasks
+    seq_dataset  = Sequential_Generic_MIL_Dataset(cfg)
+    num_classes  = seq_dataset.num_classes
+
+    # Load embeddings tuỳ theo mode
+    if args.mode == "tcp":
+        task_prompts = torch.load(PROJECT_ROOT / "task_prompts.pt").to(device)
+        if getattr(cfg.dataset, 'order', 'forward') == 'reverse':
+            task_prompts = task_prompts.flip(0)
+        all_class_embeddings = None
+    else:
+        task_prompts         = None
+        all_class_embeddings = build_class_embeddings(device)
+
+    mACCs_all_folds        = []
+    fgt_all_folds          = []
+    bwt_all_folds          = []
     ACC_all_seqs_all_folds = []
-    task_prompts = torch.load(PROJECT_ROOT / "task_prompts.pt")
 
-    for fold_id in tqdm(range(0, 10)):
-        fold = "fold_" + str(fold_id)
+    for fold_id in tqdm(range(cfg.training.num_folds), desc="Folds"):
+        fold = f"fold_{fold_id}"
+
         task_model_paths = [
-            f"{args.save_dir}" + fold_id + "/ckpts_outputs_finetuning_task_" + str(task_id) + ".pt" 
-                for task_id in range(0, args.num_tasks)
+            str(Path(args.save_dir) / fold / f"task_{t}.pt")
+            for t in range(num_tasks)
         ]
-        # print("Testing", fold)
-        mean_ACCs = []
-        acc_per_task_all_tasks = []
-        ACC_all_seqs = []
-        
-        for seq_task in tqdm(list_num_tasks):
-            seed_torch(device, 0)
-            num_correct = 0.
-            num_total = 0.
 
-            acc_per_task = [0 for t in range(0, seq_task)]
-            merge_model_path = str(args.merge_model_path) + "_{}".format(fold) + \
-                                "/" + "merged_weight_opcm_random_sampling_{}_task_{}".format(fold, seq_task-1) + ".pth"
-            
-            # print(merge_model_path)
-            base_model = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
-            base_model = base_model.to(device)
-            base_model.vision_encoder.load_state_dict(torch.load(merge_model_path))
-            model = CustomSequential(base_model, nn.Identity())
-            model.eval()
+        acc_per_task_all_seqs = []
+        ACC_all_seqs          = []
 
-            # load all MLPs
-            mlp_task_weights = [torch.load(task_model_paths[task_id]) for task_id in range(seq_task)]
-            for i in range(len(mlp_task_weights)):
-                mlp_task_weights[i] = {k.split('mlp.')[-1]:mlp_task_weights[i][k] for k in list(mlp_task_weights[i].keys())[-2:]}
-            
-            merge_mlp_data = dict()
-            merge_mlp_data['weight'] = torch.cat([data['weight'] for data in mlp_task_weights])
-            merge_mlp_data['bias'] = torch.cat([data['bias'] for data in mlp_task_weights])
+        for seq_task in tqdm(range(1, num_tasks + 1), desc="Seq tasks", leave=False):
+            seed_torch(device, cfg.training.seed)
+
+            if seq_task == 1:
+                # seq_task=1: chỉ task 0 — load thẳng finetuned checkpoint task 0
+                # Đây là ACC_t(t) = ACC ngay sau khi finetuned task 0, chưa merge gì
+                # Dùng vision encoder của base TITAN (chưa finetune)
+                # vì finetuned checkpoint chỉ lưu backbone+mlp state_dict,
+                # không lưu riêng vision encoder — giống cách code gốc dùng task_0.pth
+                ckpt_path = Path(args.save_dir) / fold / "task_0.pt"
+                state = torch.load(str(ckpt_path), map_location="cpu")
+                # Lấy backbone weights (bỏ 2 key cuối là mlp)
+                backbone_state = {
+                    k.split("backbone.")[-1]: state[k]
+                    for k in list(state.keys())[:-2]
+                }
+                base_model = AutoModel.from_pretrained(
+                    "MahmoodLab/TITAN", trust_remote_code=True
+                ).to(device)
+                base_model.vision_encoder.load_state_dict(backbone_state, strict=True)
+            elif seq_task < num_tasks:
+                ckpt_name  = f"merged_task_{seq_task}.pth"
+                merge_model_path = Path(args.merge_model_path) / fold / ckpt_name
+                base_model = AutoModel.from_pretrained(
+                    "MahmoodLab/TITAN", trust_remote_code=True
+                ).to(device)
+                base_model.vision_encoder.load_state_dict(
+                    torch.load(str(merge_model_path), map_location="cpu")
+                )
+            else:
+                # seq_task=6: final merged checkpoint
+                merge_model_path = Path(args.merge_model_path) / fold / "merged_final.pth"
+                base_model = AutoModel.from_pretrained(
+                    "MahmoodLab/TITAN", trust_remote_code=True
+                ).to(device)
+                base_model.vision_encoder.load_state_dict(
+                    torch.load(str(merge_model_path), map_location="cpu")
+                )
+
+            model = CustomSequential(base_model, nn.Identity()).eval()
+
+            num_correct  = 0.0
+            num_total    = 0.0
+            acc_per_task = []
 
             for task_id in range(seq_task):
                 _, _, test_loader = seq_dataset.get_data_loaders(fold_id, task_id)
-                results, preds_all, targets_all = eval(test_loader, model, num_classes[:seq_task], device, task_prompts[:seq_task], task_model_paths[:seq_task], merge_mlp_data, prefix="", save_location=None)
-                
-                num_correct += sum(preds_all == targets_all)
-                num_total += len(test_loader)
-                acc_per_task[task_id] = sum(preds_all == targets_all) / len(targets_all)
-            
-            overall_acc = num_correct / num_total
-            ACC_all_seqs.append(overall_acc)
-            acc_per_task_all_tasks.append(acc_per_task)
 
-        # print(overall_acc)
-        # print(acc_per_task)
+                if args.mode == "tcp":
+                    _, preds_all, targets_all = eval_task_tcp(
+                        test_loader, model,
+                        num_classes[:seq_task],
+                        task_prompts[:seq_task],
+                        task_model_paths[:seq_task],
+                        device,
+                    )
+                else:
+                    _, preds_all, targets_all = eval_task_naive(
+                        test_loader, task_id, model,
+                        all_class_embeddings, device,
+                        max_classes=sum(seq_dataset.num_classes[:seq_task]),
+                        task_to_global_class=seq_dataset.task_to_global_class,
+                        task_class_ranges=seq_dataset.task_class_ranges,
+                    )
+
+                num_correct += sum(preds_all == targets_all)
+                num_total   += len(test_loader)
+                acc_per_task.append(
+                    sum(preds_all == targets_all) / len(targets_all)
+                )
+
+            ACC_all_seqs.append(float(num_correct / num_total))
+            acc_per_task_all_seqs.append(acc_per_task)
+
+            del base_model, model
+            torch.cuda.empty_cache()
 
         mACC = np.mean(ACC_all_seqs)
+        fgt  = forgetting(acc_per_task_all_seqs)
+        bwt  = backward_transfer(acc_per_task_all_seqs)
+
         ACC_all_seqs_all_folds.append(ACC_all_seqs)
         mACCs_all_folds.append(mACC)
-        fgt = forgetting(acc_per_task_all_tasks)
-        bwt = backward_transfer(acc_per_task_all_tasks)
         fgt_all_folds.append(fgt)
         bwt_all_folds.append(bwt)
 
-    print(ACC_all_seqs_all_folds)
-    print("mACC", np.mean(mACCs_all_folds), "std", np.std(mACCs_all_folds))
-    print("BWT", np.mean(bwt_all_folds), "std", np.std(bwt_all_folds))
-    print("FGT", np.mean(fgt_all_folds), "std", np.std(fgt_all_folds))
+        print(f"[Fold {fold_id}] mACC={mACC*100:.4f}% "
+              f"FGT={fgt*100:.4f}% BWT={bwt*100:.4f}%")
+
+    mode_label = "TCP" if args.mode == "tcp" else "Naive"
+    print(f"\n===== Class-IL ({mode_label}) BWT/FGT Results =====")
+    print(f"mACC: {np.mean(mACCs_all_folds)*100:.4f}% ({np.std(mACCs_all_folds)*100:.4f}%)")
+    print(f"BWT:  {np.mean(bwt_all_folds)*100:.4f}% ({np.std(bwt_all_folds)*100:.4f}%)")
+    print(f"FGT:  {np.mean(fgt_all_folds)*100:.4f}% ({np.std(fgt_all_folds)*100:.4f}%)")
+
+    print("\nACC per seq task (mean across folds):")
+    acc_seq_arr = np.array(ACC_all_seqs_all_folds)
+    for t in range(num_tasks):
+        print(f"  After task {t+1}: {np.mean(acc_seq_arr[:, t])*100:.4f}% "
+              f"({np.std(acc_seq_arr[:, t])*100:.4f}%)")

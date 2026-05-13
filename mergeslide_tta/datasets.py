@@ -3,13 +3,10 @@ from argparse import Namespace
 from torch import nn as nn
 from torchvision.transforms import transforms
 from torch.utils.data import DataLoader
-from typing import Tuple
 from torchvision import datasets
-import numpy as np
 import torch.optim
 import os
 import torch
-import numpy as np
 import pandas as pd
 import math
 from scipy import stats
@@ -19,9 +16,9 @@ import bisect
 from torch.utils.data import Dataset
 import h5py
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 import numpy as np
 from typing import Tuple
+from mergeslide_tta.constants import NUM_CLASSES, TASK_NAMES
 
 class ContinualDataset:
     """
@@ -580,11 +577,25 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
             # Lấy dataloader config từ yaml
             self.batch_size  = cfg.dataloader.batch_size
             self.num_workers = cfg.dataloader.num_workers
+
+            # Đảo thứ tự nếu config yêu cầu
+            order = getattr(cfg.dataset, "order", "forward")
+            if order == 'reverse':
+                self.datasets   = list(reversed(self.datasets))
+                self.split_dirs = list(reversed(self.split_dirs))
+                # NUM_CLASSES cũng phải reverse theo
+                self.num_classes = list(reversed(NUM_CLASSES))
+                self.task_names  = list(reversed(TASK_NAMES))
+            else:
+                self.num_classes = list(NUM_CLASSES)
+                self.task_names  = list(TASK_NAMES)
         else:
             self._init_hardcoded()
             # Fallback về giá trị gốc
             self.batch_size  = 1
             self.num_workers = 4
+        
+        self._build_class_mappings()
 
     # ------------------------------------------------------------------
     # Khởi tạo từ config
@@ -734,6 +745,42 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
         self.val_loader   = val_loader
 
         return train_loader, val_loader, test_loaders
+
+    def _build_class_mappings(self):
+        """
+        Build TASK_CLASS_RANGES và TASK_TO_GLOBAL_CLASS
+        theo đúng thứ tự hiện tại của self.num_classes.
+        """
+        task_class_ranges   = {}
+        task_to_global_class = {}
+        start = 0
+        for task_id, n in enumerate(self.num_classes):
+            end = start + n - 1
+            task_class_ranges[task_id] = [start, end]
+            task_to_global_class[task_id] = {
+                local: global_
+                for local, global_ in enumerate(range(start, end + 1))
+            }
+            start = end + 1
+        self.task_class_ranges    = task_class_ranges
+        self.task_to_global_class = task_to_global_class
+
+        # THÊM ĐOẠN NÀY:
+        # prompt_classifier luôn build theo thứ tự FORWARD
+        # cần map task_id hiện tại → đúng slice trong classifier
+        _FORWARD_NAMES = ["BRCA", "RCC", "NSCLC", "ESCA", "TGCT", "CESC"]
+        _FORWARD_CLASS_RANGES = {
+            0: [0,  1],
+            1: [2,  4],
+            2: [5,  6],
+            3: [7,  8],
+            4: [9,  10],
+            5: [11, 12],
+        }
+        self.classifier_class_ranges = {
+            task_id: _FORWARD_CLASS_RANGES[_FORWARD_NAMES.index(name)]
+            for task_id, name in enumerate(self.task_names)
+        }
         
 if __name__ == '__main__':
     seq_dataset = Sequential_Generic_MIL_Dataset()
