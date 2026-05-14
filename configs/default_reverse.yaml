@@ -2,7 +2,7 @@
 # Thay /path/to/your/dataset bằng root thực tế trên máy của bạn
 
 dataset:
-  root: "/datastore/uittogether3/LuuTru/Thanhld/WSI/dataset"
+  root: "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset"
   
   order: "reverse"
 
@@ -43,7 +43,7 @@ training:
 
 dataloader:
   batch_size: 1       # MIL cố định batch=1 (mỗi WSI là 1 bag có kích thước khác nhau)
-  num_workers: 40      # tăng nếu CPU nhiều core, giảm nếu debug
+  num_workers: 4      # tăng nếu CPU nhiều core, giảm nếu debug
 
 paths:
   task_prompts: "./task_prompts.pt"
