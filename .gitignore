@@ -72,3 +72,8 @@ flatten_wsi_dataset.py
 BRCA.sh.bak_invalid_utf8
 CESC.sh.bak_pre_mpp_filter
 zip_tcga_datasets.py
+.agents/
+AGENTS.md
+checkpoints_test/
+datasets_py_explanation_vi.md
+

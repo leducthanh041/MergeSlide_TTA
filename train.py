@@ -169,7 +169,7 @@ if __name__ == "__main__":
     args = parser.parse_args()  # ← parse ONCE, outside fold loop
 
     cfg    = OmegaConf.load(args.config)
-    device = require_cuda_device()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print_gpu_vram("startup", device)
     seed_torch(device, cfg.training.seed)
 
