@@ -89,7 +89,24 @@ echo "[INFO] launching training at $(date)"
 
 cd /datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA
 
-python -u test_classIL_task_prompt.py \
-    --save_dir ./checkpoints/finetuned \
-    --merge_model_path ./checkpoints/merged \
+# python -u test_classIL_task_prompt.py \
+#     --save_dir ./checkpoints/finetuned \
+#     --merge_model_path ./checkpoints/merged \
+#     --mode tcp
+
+# python -u test_classIL_task_prompt.py \
+#     --save_dir ./checkpoints/finetuned \
+#     --merge_model_path ./checkpoints/merged \
+#     --mode naive
+
+#python test_classIL_task_prompt.py \
+#    --config configs/default_reverse.yaml \
+#    --save_dir ./checkpoints/finetuned_reverse \
+#    --merge_model_path ./checkpoints/merged_reverse \
+#    --mode tcp
+
+python test_classIL_task_prompt.py \
+    --config configs/default_reverse.yaml \
+    --save_dir ./checkpoints/finetuned_reverse \
+    --merge_model_path ./checkpoints/merged_reverse \
     --mode naive

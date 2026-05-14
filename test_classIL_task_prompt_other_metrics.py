@@ -42,6 +42,14 @@ from mergeslide_tta.utils import get_eval_metrics, seed_torch
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
+_PROMPT_FN_MAP = {
+    "BRCA":  brca_prompts,
+    "RCC":   rcc_prompts,
+    "NSCLC": nsclc_prompts,
+    "ESCA":  esca_prompts,
+    "TGCT":  tgct_prompts,
+    "CESC":  cesc_prompts,
+}
 
 # ---------------------------------------------------------------------------
 # Inference functions
@@ -104,8 +112,7 @@ def eval_task_naive(
     all_class_embeddings: torch.Tensor,
     device,
     task_to_global_class: dict,
-    task_class_ranges: dict, 
-    max_classes: int = None,
+    task_class_ranges: dict,
 ) -> tuple:
     """
     Naive inference:
@@ -123,13 +130,6 @@ def eval_task_naive(
     global_to_local = {v: k for k, v in task_to_global_class[task_id].items()}
     start, end      = task_class_ranges[task_id]
 
-    # Slice embeddings về không gian class đã học
-    effective_embeddings = (
-        all_class_embeddings[:, :max_classes]
-        if max_classes is not None
-        else all_class_embeddings
-    )
-
     with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
         for features, coords, label in tqdm(test_loader, leave=False):
             features = features.to(device)
@@ -138,7 +138,7 @@ def eval_task_naive(
             features, coords = features[idx], coords[idx]
 
             slide_embed   = model.backbone(features, coords, ps)
-            logits_global = (slide_embed @ effective_embeddings).float()
+            logits_global = (slide_embed @ all_class_embeddings).float()
             global_pred   = int(logits_global.argmax(1))
             local_pred    = global_to_local.get(global_pred, 0)
 
@@ -168,10 +168,14 @@ def _pack_results(preds_all, targets_all, probs_all) -> tuple:
     return metrics, preds_arr, targets_arr
 
 
-def build_class_embeddings(device) -> torch.Tensor:
+def build_class_embeddings(device, task_names: list) -> torch.Tensor:
     """
-    Build all_class_embeddings [EMBED_DIM, 13] từ TITAN text encoder.
+    Build all_class_embeddings [EMBED_DIM, total_classes] từ TITAN text encoder.
     Dùng cho Naive mode.
+
+    Columns được sắp xếp theo đúng thứ tự task_names:
+        Forward:  col 0,1=BRCA | 2,3,4=RCC | 5,6=NSCLC | 7,8=ESCA | 9,10=TGCT | 11,12=CESC
+        Reversed: col 0,1=CESC | 2,3=TGCT  | 4,5=ESCA  | 6,7=NSCLC | 8,9,10=RCC | 11,12=BRCA
     """
     print("Building all_class_embeddings for Naive mode ...")
     titan = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
@@ -179,16 +183,14 @@ def build_class_embeddings(device) -> torch.Tensor:
 
     _, templates = brca_prompts()
     all_prompts  = []
-    for fn in [brca_prompts, rcc_prompts, nsclc_prompts,
-               esca_prompts, tgct_prompts, cesc_prompts]:
-        class_prompts, _ = fn()
+    for name in task_names:
+        class_prompts, _ = _PROMPT_FN_MAP[name]()
         all_prompts.extend(class_prompts)
 
     with torch.autocast("cuda", torch.float16), torch.inference_mode():
         classifier = titan.zero_shot_classifier(
             all_prompts, templates, device=str(device)
         )
-
     del titan
     torch.cuda.empty_cache()
     return classifier.to(device)
@@ -228,7 +230,7 @@ if __name__ == "__main__":
         all_class_embeddings = None
     else:
         task_prompts         = None
-        all_class_embeddings = build_class_embeddings(device)
+        all_class_embeddings = build_class_embeddings(device, seq_dataset.task_names)
 
     mACCs_all_folds        = []
     fgt_all_folds          = []
@@ -306,7 +308,6 @@ if __name__ == "__main__":
                     _, preds_all, targets_all = eval_task_naive(
                         test_loader, task_id, model,
                         all_class_embeddings, device,
-                        max_classes=sum(seq_dataset.num_classes[:seq_task]),
                         task_to_global_class=seq_dataset.task_to_global_class,
                         task_class_ranges=seq_dataset.task_class_ranges,
                     )

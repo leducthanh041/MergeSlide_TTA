@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=16G
-#SBATCH --gres=mps:l40:2
+#SBATCH --gres=mps:2
 #SBATCH --time=72:00:00
 
 set -euo pipefail
@@ -89,7 +89,24 @@ echo "[INFO] launching training at $(date)"
 
 cd /datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA
 
+# python -u test_classIL_task_prompt_other_metrics.py \
+#     --save_dir ./checkpoints/finetuned \
+#     --merge_model_path ./checkpoints/merged \
+#     --mode naive
+
+# python -u test_classIL_task_prompt_other_metrics.py \
+#     --save_dir ./checkpoints/finetuned \
+#     --merge_model_path ./checkpoints/merged \
+#     --mode tcp
+
 python -u test_classIL_task_prompt_other_metrics.py \
-    --save_dir ./checkpoints/finetuned \
-    --merge_model_path ./checkpoints/merged \
+    --config configs/default_reverse.yaml \
+    --save_dir ./checkpoints/finetuned_reverse \
+    --merge_model_path ./checkpoints/merged_reverse \
     --mode naive
+
+# python -u test_classIL_task_prompt_other_metrics.py \
+#    --config configs/default_reverse.yaml \
+#    --save_dir ./checkpoints/finetuned_reverse \
+#    --merge_model_path ./checkpoints/merged_reverse \
+#    --mode tcp

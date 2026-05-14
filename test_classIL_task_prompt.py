@@ -50,6 +50,14 @@ from mergeslide_tta.utils import get_eval_metrics, seed_torch
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
+_PROMPT_FN_MAP = {
+    "BRCA":  brca_prompts,
+    "RCC":   rcc_prompts,
+    "NSCLC": nsclc_prompts,
+    "ESCA":  esca_prompts,
+    "TGCT":  tgct_prompts,
+    "CESC":  cesc_prompts,
+}
 
 # ---------------------------------------------------------------------------
 # Inference functions
@@ -216,10 +224,14 @@ def _pack_results(
     )
 
 
-def build_class_embeddings(device) -> torch.Tensor:
+def build_class_embeddings(device, task_names: list) -> torch.Tensor:
     """
-    Build all_class_embeddings [EMBED_DIM, 13] từ TITAN text encoder.
+    Build all_class_embeddings [EMBED_DIM, total_classes] từ TITAN text encoder.
     Dùng cho Naive mode.
+
+    Columns được sắp xếp theo đúng thứ tự task_names:
+        Forward:  col 0,1=BRCA | 2,3,4=RCC | 5,6=NSCLC | 7,8=ESCA | 9,10=TGCT | 11,12=CESC
+        Reversed: col 0,1=CESC | 2,3=TGCT  | 4,5=ESCA  | 6,7=NSCLC | 8,9,10=RCC | 11,12=BRCA
     """
     print("Building all_class_embeddings for Naive mode ...")
     titan = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
@@ -227,16 +239,14 @@ def build_class_embeddings(device) -> torch.Tensor:
 
     _, templates = brca_prompts()
     all_prompts  = []
-    for fn in [brca_prompts, rcc_prompts, nsclc_prompts,
-               esca_prompts, tgct_prompts, cesc_prompts]:
-        class_prompts, _ = fn()
+    for name in task_names:
+        class_prompts, _ = _PROMPT_FN_MAP[name]()
         all_prompts.extend(class_prompts)
 
     with torch.autocast("cuda", torch.float16), torch.inference_mode():
         classifier = titan.zero_shot_classifier(
             all_prompts, templates, device=str(device)
-        )  # shape [EMBED_DIM, 13]
-
+        )
     del titan
     torch.cuda.empty_cache()
     return classifier.to(device)
@@ -276,7 +286,7 @@ if __name__ == "__main__":
         all_class_embeddings = None
     else:
         task_prompts        = None
-        all_class_embeddings = build_class_embeddings(device)
+        all_class_embeddings = build_class_embeddings(device, seq_dataset.task_names)
 
     print("Loading TITAN base model ...")
     base_model = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
