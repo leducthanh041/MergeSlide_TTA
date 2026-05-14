@@ -93,4 +93,4 @@ cd /datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA
 #     --src_finedtuned_checkpoints /datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/checkpoints/finetuned/ \
 #     --des_merged_checkpoints /datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/checkpoints/merged/ \
 
-python -u merge.py --config configs/default.yaml
+python -u merge.py --config configs/default_reverse.yaml
