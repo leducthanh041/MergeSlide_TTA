@@ -89,24 +89,32 @@ echo "[INFO] launching training at $(date)"
 
 cd /datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA
 
-# python -u test_classIL_task_prompt.py \
-#     --save_dir ./checkpoints/finetuned \
-#     --merge_model_path ./checkpoints/merged \
-#     --mode tcp
+python -u test_classIL_task_prompt.py \
+    --save_dir ./checkpoints/finetuned \
+     --merge_model_path ./checkpoints/merged \
+     --mode tcp \
+     2> >(tee /mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/logs/error_test_class_tcp.log >&2) \
+     > >(tee /mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/logs/result_test_class_tcp.log)
 
-# python -u test_classIL_task_prompt.py \
-#     --save_dir ./checkpoints/finetuned \
-#     --merge_model_path ./checkpoints/merged \
-#     --mode naive
+python -u test_classIL_task_prompt.py \
+    --save_dir ./checkpoints/finetuned \
+    --merge_model_path ./checkpoints/merged \
+    --mode naive \
+    2> >(tee /mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/logs/error_test_class_naive.log >&2) \
+     > >(tee /mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/logs/result_test_class_naive.log)
 
-#python test_classIL_task_prompt.py \
-#    --config configs/default_reverse.yaml \
-#    --save_dir ./checkpoints/finetuned_reverse \
-#    --merge_model_path ./checkpoints/merged_reverse \
-#    --mode tcp
+python test_classIL_task_prompt.py \
+    --config configs/default_reverse.yaml \
+    --save_dir ./checkpoints/finetuned_reverse \
+   --merge_model_path ./checkpoints/merged_reverse \
+   --mode tcp \
+   2> >(tee /mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/logs/error_test_class_tcp_re.log >&2) \
+   > >(tee /mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/logs/result_test_class_tcp_re.log)
 
 python test_classIL_task_prompt.py \
     --config configs/default_reverse.yaml \
     --save_dir ./checkpoints/finetuned_reverse \
     --merge_model_path ./checkpoints/merged_reverse \
-    --mode naive
+    --mode naive \
+    2> >(tee /mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/logs/error_test_class_naive_re.log >&2) \
+     > >(tee /mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/logs/result_test_class_naive_re.log)

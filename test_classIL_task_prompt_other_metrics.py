@@ -129,6 +129,17 @@ def eval_task_naive(
 
     global_to_local = {v: k for k, v in task_to_global_class[task_id].items()}
     start, end      = task_class_ranges[task_id]
+    
+    # ── DEBUG ──────────────────────────────────────────────────────
+    print(f"\n[DEBUG] task_id={task_id}")
+    print(f"[DEBUG] task_class_ranges[{task_id}] = [{start}, {end}]")
+    print(f"[DEBUG] task_to_global_class[{task_id}] = {task_to_global_class[task_id]}")
+    print(f"[DEBUG] global_to_local = {global_to_local}")
+    print(f"[DEBUG] all_class_embeddings shape = {all_class_embeddings.shape}")
+    print(f"[DEBUG] all_class_embeddings[:, {start}:{end+1}] = col {start}..{end} "
+          f"(size {end-start+1})")
+    debug_count = 0
+    # ───────────────────────────────────────────────────────────────
 
     with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
         for features, coords, label in tqdm(test_loader, leave=False):
@@ -144,11 +155,39 @@ def eval_task_naive(
 
             probs_global = nn.functional.softmax(logits_global, dim=1)
             probs_local  = probs_global[:, start:end + 1]
+            
+            # ── DEBUG ──────────────────────────────────────────────
+            if debug_count < 10:
+                print(f"[DEBUG slide {debug_count}] "
+                      f"label(local)={int(label)} | "
+                      f"global_pred={global_pred} | "
+                      f"local_pred={local_pred} | "
+                      f"correct={local_pred == int(label)} | "
+                      f"top3_logits={logits_global[0].topk(3).indices.tolist()} "
+                      f"top3_vals={logits_global[0].topk(3).values.tolist()}")
+                debug_count += 1
+            # ───────────────────────────────────────────────────────
 
             preds_all.append(np.array([local_pred]))
             probs_all.append(probs_local.cpu().numpy())
             targets_all.append(label.numpy())
-
+    
+    # ── DEBUG SUMMARY ──────────────────────────────────────────────
+    preds_tmp   = np.concatenate(preds_all)
+    targets_tmp = np.concatenate(targets_all)
+    in_task_mask = np.array([global_to_local.get(p, -1) >= 0
+                              for p in [global_to_local.get(int(p), -1)
+                                        for p in preds_tmp]])
+    print(f"\n[DEBUG SUMMARY task {task_id}]")
+    print(f"  Total slides       : {len(targets_tmp)}")
+    print(f"  Correct (local)    : {sum(preds_tmp == targets_tmp)}")
+    print(f"  ACC                : {sum(preds_tmp == targets_tmp)/len(targets_tmp)*100:.2f}%")
+    print(f"  global_pred distribution: "
+          f"{dict(zip(*np.unique(np.concatenate(preds_all), return_counts=True)))}")
+    print(f"  target distribution     : "
+          f"{dict(zip(*np.unique(targets_tmp, return_counts=True)))}")
+    # ───────────────────────────────────────────────────────────────
+    
     return _pack_results(preds_all, targets_all, probs_all)
 
 def _pack_results(preds_all, targets_all, probs_all) -> tuple:

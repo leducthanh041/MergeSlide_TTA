@@ -79,3 +79,13 @@ configs/.nfs00000000153fec1c00000397
 AGENTS.md
 checkpoints_test/
 datasets_py_explanation_vi.md
+
+.nfs00000000153d22a8000003d0
+configs/.nfs0000000011033594000003cf
+configs/.nfs00000000153fed51000003ce
+
+configs/default_eval_num_workers0.yaml
+scripts/test_classIL_tcp_num_workers0.sh
+scripts/test_classIL_tcp_pt_features_num_workers0.sh
+tools/
+

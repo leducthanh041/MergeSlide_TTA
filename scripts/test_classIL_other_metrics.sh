@@ -103,7 +103,9 @@ python -u test_classIL_task_prompt_other_metrics.py \
     --config configs/default_reverse.yaml \
     --save_dir ./checkpoints/finetuned_reverse \
     --merge_model_path ./checkpoints/merged_reverse \
-    --mode naive
+    --mode naive \
+    2> >(tee /mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/logs/error.log >&2) \
+    > >(tee /mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/logs/result.log)
 
 # python -u test_classIL_task_prompt_other_metrics.py \
 #    --config configs/default_reverse.yaml \
