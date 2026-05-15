@@ -16,6 +16,7 @@ from sklearn.metrics import balanced_accuracy_score
 from tqdm import tqdm
 
 from mergeslide_tta.constants import NUM_TASKS, NUM_CLASSES, TASK_CLASS_RANGES, K_PATCHES, TITAN_PS_ARG, TASK_NAMES
+from mergeslide_tta.checkpoint_mirror import save_checkpoint_with_mirror
 from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
 from mergeslide_tta.model import build_model, build_prompt_classifier, cosine_lr, EarlyStopping
 from mergeslide_tta.utils import seed_torch
@@ -150,13 +151,12 @@ def train_one_task(
     return model
 
 
-def save_checkpoint(model: nn.Module, save_dir: str, fold_id: int, task_id: int) -> str:
-    """Save model state_dict. Returns the saved path."""
+def save_checkpoint(model: nn.Module, save_dir: str, fold_id: int, task_id: int) -> tuple[str, str | None]:
+    """Save model state_dict. Returns primary and mirror paths."""
     fold_dir = Path(save_dir) / f"fold_{fold_id}"
-    fold_dir.mkdir(parents=True, exist_ok=True)
     path = fold_dir / f"task_{task_id}.pt"
-    torch.save(model.state_dict(), path)
-    return str(path)
+    primary_path, mirror_path = save_checkpoint_with_mirror(model.state_dict(), path)
+    return str(primary_path), str(mirror_path) if mirror_path is not None else None
 
 
 if __name__ == "__main__":
@@ -215,8 +215,11 @@ if __name__ == "__main__":
             elapsed = time.time() - t0
 
             # ← FIX: checkpoint saving (bị thiếu hoàn toàn trong code gốc)
-            ckpt_path = save_checkpoint(model, save_dir, fold_id, task_id)
-            print(f"Saved: {ckpt_path} | Time: {elapsed:.1f}s")
+            ckpt_path, mirror_path = save_checkpoint(model, save_dir, fold_id, task_id)
+            if mirror_path is not None:
+                print(f"Saved: {ckpt_path} | Mirror: {mirror_path} | Time: {elapsed:.1f}s")
+            else:
+                print(f"Saved: {ckpt_path} | Time: {elapsed:.1f}s")
 
             del model
             torch.cuda.empty_cache()

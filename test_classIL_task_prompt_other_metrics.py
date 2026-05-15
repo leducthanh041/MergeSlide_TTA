@@ -18,6 +18,7 @@ Cấu trúc checkpoint kỳ vọng:
     Final        : {merge_model_path}/fold_{id}/merged_final.pth
 """
 import argparse
+import os
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +42,56 @@ from mergeslide_tta.prompts_zeroshot import (
 from mergeslide_tta.utils import get_eval_metrics, seed_torch
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+HOT_DIR_NAMES = {"checkpoints", "logs", "sqlite"}
+
+
+def get_local_hot_root() -> Path:
+    user = os.environ.get("USER") or "thanhld"
+    default_root = Path("/docker/data") / user / PROJECT_ROOT.name
+    return Path(os.environ.get("MERGESLIDE_LOCAL_ROOT", default_root)).expanduser()
+
+
+def ensure_local_hot_storage() -> Path:
+    local_root = get_local_hot_root()
+    local_root.mkdir(parents=True, exist_ok=True)
+    for name in HOT_DIR_NAMES:
+        (local_root / name).mkdir(parents=True, exist_ok=True)
+    (local_root / "tmp").mkdir(parents=True, exist_ok=True)
+
+    for name in ("logs", "checkpoints"):
+        repo_path = PROJECT_ROOT / name
+        local_path = local_root / name
+        if repo_path.is_symlink():
+            if repo_path.resolve() != local_path.resolve():
+                print(f"[WARN] {repo_path} points to {repo_path.resolve()}, expected {local_path}")
+        elif repo_path.exists():
+            print(f"[WARN] {repo_path} is not a symlink; use {local_path} for hot-write data.")
+        else:
+            repo_path.symlink_to(local_path, target_is_directory=True)
+
+    os.environ.setdefault("TMPDIR", str(local_root / "tmp"))
+    os.environ.setdefault("SQLITE_TMPDIR", str(local_root / "sqlite"))
+    os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
+    return local_root
+
+
+def resolve_hot_path(path: str, local_root: Path) -> Path:
+    raw_path = Path(path).expanduser()
+    if not raw_path.is_absolute():
+        parts = raw_path.parts
+        if parts and parts[0] in HOT_DIR_NAMES:
+            return local_root.joinpath(*parts)
+        return raw_path
+
+    try:
+        relative = raw_path.relative_to(PROJECT_ROOT)
+    except ValueError:
+        return raw_path
+
+    parts = relative.parts
+    if parts and parts[0] in HOT_DIR_NAMES:
+        return local_root.joinpath(*parts)
+    return raw_path
 
 _PROMPT_FN_MAP = {
     "BRCA":  brca_prompts,
@@ -113,6 +164,7 @@ def eval_task_naive(
     device,
     task_to_global_class: dict,
     task_class_ranges: dict,
+    max_classes: int = None,
 ) -> tuple:
     """
     Naive inference:
@@ -124,23 +176,18 @@ def eval_task_naive(
     preds_all   = []
     probs_all   = []
     targets_all = []
+    
+    effective_embeddings = (
+        all_class_embeddings[:, :max_classes]
+        if max_classes is not None
+        else all_class_embeddings
+    )
 
     ps = torch.tensor(TITAN_PS_ARG).int().to(device)
 
     global_to_local = {v: k for k, v in task_to_global_class[task_id].items()}
     start, end      = task_class_ranges[task_id]
     
-    # ── DEBUG ──────────────────────────────────────────────────────
-    print(f"\n[DEBUG] task_id={task_id}")
-    print(f"[DEBUG] task_class_ranges[{task_id}] = [{start}, {end}]")
-    print(f"[DEBUG] task_to_global_class[{task_id}] = {task_to_global_class[task_id]}")
-    print(f"[DEBUG] global_to_local = {global_to_local}")
-    print(f"[DEBUG] all_class_embeddings shape = {all_class_embeddings.shape}")
-    print(f"[DEBUG] all_class_embeddings[:, {start}:{end+1}] = col {start}..{end} "
-          f"(size {end-start+1})")
-    debug_count = 0
-    # ───────────────────────────────────────────────────────────────
-
     with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
         for features, coords, label in tqdm(test_loader, leave=False):
             features = features.to(device)
@@ -149,44 +196,16 @@ def eval_task_naive(
             features, coords = features[idx], coords[idx]
 
             slide_embed   = model.backbone(features, coords, ps)
-            logits_global = (slide_embed @ all_class_embeddings).float()
+            logits_global = (slide_embed @ effective_embeddings).float()
             global_pred   = int(logits_global.argmax(1))
             local_pred    = global_to_local.get(global_pred, 0)
 
             probs_global = nn.functional.softmax(logits_global, dim=1)
             probs_local  = probs_global[:, start:end + 1]
-            
-            # ── DEBUG ──────────────────────────────────────────────
-            if debug_count < 10:
-                print(f"[DEBUG slide {debug_count}] "
-                      f"label(local)={int(label)} | "
-                      f"global_pred={global_pred} | "
-                      f"local_pred={local_pred} | "
-                      f"correct={local_pred == int(label)} | "
-                      f"top3_logits={logits_global[0].topk(3).indices.tolist()} "
-                      f"top3_vals={logits_global[0].topk(3).values.tolist()}")
-                debug_count += 1
-            # ───────────────────────────────────────────────────────
 
             preds_all.append(np.array([local_pred]))
             probs_all.append(probs_local.cpu().numpy())
             targets_all.append(label.numpy())
-    
-    # ── DEBUG SUMMARY ──────────────────────────────────────────────
-    preds_tmp   = np.concatenate(preds_all)
-    targets_tmp = np.concatenate(targets_all)
-    in_task_mask = np.array([global_to_local.get(p, -1) >= 0
-                              for p in [global_to_local.get(int(p), -1)
-                                        for p in preds_tmp]])
-    print(f"\n[DEBUG SUMMARY task {task_id}]")
-    print(f"  Total slides       : {len(targets_tmp)}")
-    print(f"  Correct (local)    : {sum(preds_tmp == targets_tmp)}")
-    print(f"  ACC                : {sum(preds_tmp == targets_tmp)/len(targets_tmp)*100:.2f}%")
-    print(f"  global_pred distribution: "
-          f"{dict(zip(*np.unique(np.concatenate(preds_all), return_counts=True)))}")
-    print(f"  target distribution     : "
-          f"{dict(zip(*np.unique(targets_tmp, return_counts=True)))}")
-    # ───────────────────────────────────────────────────────────────
     
     return _pack_results(preds_all, targets_all, probs_all)
 
@@ -252,6 +271,13 @@ if __name__ == "__main__":
                         choices=["tcp", "naive"],
                         help="tcp (default): TCP inference | naive: direct class inference")
     args = parser.parse_args()
+
+    local_hot_root = ensure_local_hot_storage()
+    args.save_dir = str(resolve_hot_path(args.save_dir, local_hot_root))
+    args.merge_model_path = str(resolve_hot_path(args.merge_model_path, local_hot_root))
+    print(f"[INFO] Local hot storage root: {local_hot_root}")
+    print(f"[INFO] Finetuned checkpoints: {args.save_dir}")
+    print(f"[INFO] Merged checkpoints: {args.merge_model_path}")
 
     cfg    = OmegaConf.load(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -349,6 +375,7 @@ if __name__ == "__main__":
                         all_class_embeddings, device,
                         task_to_global_class=seq_dataset.task_to_global_class,
                         task_class_ranges=seq_dataset.task_class_ranges,
+                        max_classes=sum(seq_dataset.num_classes[:seq_task]),
                     )
 
                 num_correct += sum(preds_all == targets_all)

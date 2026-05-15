@@ -13,6 +13,7 @@ Cấu trúc checkpoint kỳ vọng:
     Merged    : {merge_model_path}_fold_{id}/merged_final.pth
 """
 import argparse
+import os
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,58 @@ from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
 from mergeslide_tta.metrics import pad_numpy_arrays
 from mergeslide_tta.model import CustomSequential
 from mergeslide_tta.utils import get_eval_metrics, seed_torch
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+HOT_DIR_NAMES = {"checkpoints", "logs", "sqlite"}
+
+
+def get_local_hot_root() -> Path:
+    user = os.environ.get("USER") or "thanhld"
+    default_root = Path("/docker/data") / user / PROJECT_ROOT.name
+    return Path(os.environ.get("MERGESLIDE_LOCAL_ROOT", default_root)).expanduser()
+
+
+def ensure_local_hot_storage() -> Path:
+    local_root = get_local_hot_root()
+    local_root.mkdir(parents=True, exist_ok=True)
+    for name in HOT_DIR_NAMES:
+        (local_root / name).mkdir(parents=True, exist_ok=True)
+    (local_root / "tmp").mkdir(parents=True, exist_ok=True)
+
+    for name in ("logs", "checkpoints"):
+        repo_path = PROJECT_ROOT / name
+        local_path = local_root / name
+        if repo_path.is_symlink():
+            if repo_path.resolve() != local_path.resolve():
+                print(f"[WARN] {repo_path} points to {repo_path.resolve()}, expected {local_path}")
+        elif repo_path.exists():
+            print(f"[WARN] {repo_path} is not a symlink; use {local_path} for hot-write data.")
+        else:
+            repo_path.symlink_to(local_path, target_is_directory=True)
+
+    os.environ.setdefault("TMPDIR", str(local_root / "tmp"))
+    os.environ.setdefault("SQLITE_TMPDIR", str(local_root / "sqlite"))
+    os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
+    return local_root
+
+
+def resolve_hot_path(path: str, local_root: Path) -> Path:
+    raw_path = Path(path).expanduser()
+    if not raw_path.is_absolute():
+        parts = raw_path.parts
+        if parts and parts[0] in HOT_DIR_NAMES:
+            return local_root.joinpath(*parts)
+        return raw_path
+
+    try:
+        relative = raw_path.relative_to(PROJECT_ROOT)
+    except ValueError:
+        return raw_path
+
+    parts = relative.parts
+    if parts and parts[0] in HOT_DIR_NAMES:
+        return local_root.joinpath(*parts)
+    return raw_path
 
 
 def eval_task(
@@ -104,6 +157,13 @@ if __name__ == "__main__":
     parser.add_argument("--merge_model_path", type=str, required=True,
                         help="Prefix thư mục merged: {prefix}_fold_{id}/merged_final.pth")
     args = parser.parse_args()
+
+    local_hot_root = ensure_local_hot_storage()
+    args.save_dir = str(resolve_hot_path(args.save_dir, local_hot_root))
+    args.merge_model_path = str(resolve_hot_path(args.merge_model_path, local_hot_root))
+    print(f"[INFO] Local hot storage root: {local_hot_root}")
+    print(f"[INFO] Finetuned checkpoints: {args.save_dir}")
+    print(f"[INFO] Merged checkpoints: {args.merge_model_path}")
 
     cfg    = OmegaConf.load(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

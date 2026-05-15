@@ -1,114 +1,144 @@
 #!/bin/bash
+#
+# CLASS-IL continual metrics runner. Logs/checkpoints are kept on local /docker
+# via repo symlinks, while datasets remain read-only inputs on /mmlab_students.
+
 #SBATCH --job-name=om_test_classIL
-#SBATCH --output=/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/logs/om_test_classIL_%j.out
-#SBATCH --error=/datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA/logs/om_test_classIL_%j.err
+#SBATCH --output=logs/om_test_classIL_%j.out
+#SBATCH --error=logs/om_test_classIL_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=16G
-#SBATCH --gres=mps:2
 #SBATCH --time=72:00:00
 
 set -euo pipefail
 
-REQUIRED_VRAM=20000
+PROJECT_ROOT="${PROJECT_ROOT:-/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA}"
+USER_NAME="${USER:-thanhld}"
+PROJECT_NAME="$(basename "$PROJECT_ROOT")"
+export MERGESLIDE_LOCAL_ROOT="${MERGESLIDE_LOCAL_ROOT:-/docker/data/$USER_NAME/$PROJECT_NAME}"
+LOG_DIR="${LOG_DIR:-logs}"
+CONFIG_FORWARD="${CONFIG_FORWARD:-configs/default_eval_num_workers0.yaml}"
+CONFIG_REVERSE="${CONFIG_REVERSE:-configs/default_reverse_eval_num_workers0.yaml}"
+CLASSIL_WRAPPER="${CLASSIL_WRAPPER:-tools/run_classil_with_pt_features.py}"
+CLASSIL_OTHER_METRICS_ENTRYPOINT="${CLASSIL_OTHER_METRICS_ENTRYPOINT:-test_classIL_task_prompt_other_metrics.py}"
 
-cleanup() {
-    local rc=$?
-    echo "[INFO] cleanup rc=$rc at $(date)"
-    if [ -n "${CUDA_MPS_PIPE_DIRECTORY:-}" ]; then
-        rm -rf "${CUDA_MPS_PIPE_DIRECTORY}" 2>/dev/null || true
+if [ -z "${PYTHON_BIN:-}" ]; then
+    DEFAULT_PYTHON="/mmlab_students/storageStudents/nguyenvd/anaconda3/envs/mergePre/bin/python3.10"
+    if [ -x "$DEFAULT_PYTHON" ]; then
+        PYTHON_BIN="$DEFAULT_PYTHON"
+    else
+        PYTHON_BIN="python"
     fi
-    if [ -n "${CUDA_MPS_LOG_DIRECTORY:-}" ]; then
-        rm -rf "${CUDA_MPS_LOG_DIRECTORY}" 2>/dev/null || true
-    fi
-}
-trap cleanup EXIT
-
-echo "[INFO] start at $(date)"
-echo "[INFO] hostname=$(hostname)"
-echo "[INFO] SLURM_JOB_ID=${SLURM_JOB_ID:-<unset>}"
-
-module clear -f
-module load slurm/slurm/24.11
-# Tạm thời KHÔNG load cuda toolkit để tránh xung đột lib
-# module load cuda12.8/toolkit/12.8.1
-
-source /datastore/uittogether3/tools/miniconda3/etc/profile.d/conda.sh
-
-# ---- Fix lỗi conda activate + cuda-nvcc hook dưới chế độ set -u ----
-export NVCC_PREPEND_FLAGS="${NVCC_PREPEND_FLAGS:-}"
-export NVCC_APPEND_FLAGS="${NVCC_APPEND_FLAGS:-}"
-
-set +u
-conda activate /datastore/uittogether3/tools/miniconda3/envs/mergePre
-set -u
-# -------------------------------------------------------------------
-
-# ================= GPU CHECK =================
-# Với cluster này, workflow MPS thực tế ổn định là:
-# 1) bỏ CUDA_VISIBLE_DEVICES hiện tại
-# 2) gọi gpu_check.sh
-# 3) ép lại CUDA_VISIBLE_DEVICES theo BEST_GPU vật lý
-unset CUDA_VISIBLE_DEVICES
-
-set +e
-CHECK_OUT=$(/usr/local/bin/gpu_check.sh "$REQUIRED_VRAM" "$SLURM_JOB_ID" 2>&1)
-EXIT_CODE=$?
-set -e
-
-echo "[INFO] gpu_check exit_code=$EXIT_CODE"
-echo "[INFO] gpu_check output=$CHECK_OUT"
-
-if [ "$EXIT_CODE" -eq 10 ]; then
-    echo "$CHECK_OUT"
-    exit 0
-elif [ "$EXIT_CODE" -eq 11 ]; then
-    echo "$CHECK_OUT"
-    exit 1
-elif [ "$EXIT_CODE" -ne 0 ]; then
-    echo "[ERROR] gpu_check.sh returned unexpected exit code: $EXIT_CODE"
-    exit "$EXIT_CODE"
 fi
 
-BEST_GPU="$CHECK_OUT"
-echo "[INFO] BEST_GPU=$BEST_GPU"
+cd "$PROJECT_ROOT"
 
-# ================= MPS SETUP =================
-# Bám theo workflow đã test chạy ổn
-export CUDA_MPS_PIPE_DIRECTORY="/tmp/nvidia-mps-job${SLURM_JOB_ID}"
-export CUDA_MPS_LOG_DIRECTORY="/tmp/nvidia-mps-log-job${SLURM_JOB_ID}"
+mkdir -p "$MERGESLIDE_LOCAL_ROOT/logs" \
+         "$MERGESLIDE_LOCAL_ROOT/checkpoints" \
+         "$MERGESLIDE_LOCAL_ROOT/sqlite" \
+         "$MERGESLIDE_LOCAL_ROOT/tmp"
 
-rm -rf "${CUDA_MPS_PIPE_DIRECTORY}" "${CUDA_MPS_LOG_DIRECTORY}"
-mkdir -p "${CUDA_MPS_PIPE_DIRECTORY}" "${CUDA_MPS_LOG_DIRECTORY}"
+for name in logs checkpoints; do
+    repo_path="$PROJECT_ROOT/$name"
+    local_path="$MERGESLIDE_LOCAL_ROOT/$name"
+    if [ -L "$repo_path" ]; then
+        :
+    elif [ -e "$repo_path" ]; then
+        echo "[WARN] $repo_path is not a symlink; hot writes should use $local_path"
+    else
+        ln -s "$local_path" "$repo_path"
+    fi
+done
 
-export CUDA_VISIBLE_DEVICES="${BEST_GPU}"
+mkdir -p "$LOG_DIR"
+export TMPDIR="${TMPDIR:-$MERGESLIDE_LOCAL_ROOT/tmp}"
+export SQLITE_TMPDIR="${SQLITE_TMPDIR:-$MERGESLIDE_LOCAL_ROOT/sqlite}"
+export HDF5_USE_FILE_LOCKING="${HDF5_USE_FILE_LOCKING:-FALSE}"
 
-# ================= RUN =================
-echo "[INFO] launching training at $(date)"
+echo "[INFO] start at $(date)"
+echo "[INFO] project_root=$PROJECT_ROOT"
+echo "[INFO] python=$PYTHON_BIN"
+echo "[INFO] local_hot_root=$MERGESLIDE_LOCAL_ROOT"
+echo "[INFO] log_dir=$LOG_DIR"
+echo "[INFO] config_forward=$CONFIG_FORWARD"
+echo "[INFO] config_reverse=$CONFIG_REVERSE"
+echo "[INFO] classil_wrapper=$CLASSIL_WRAPPER"
+echo "[INFO] other_metrics_entrypoint=$CLASSIL_OTHER_METRICS_ENTRYPOINT"
 
-cd /datastore/uittogether3/LuuTru/Thanhld/WSI/MergeSlide_TTA
+check_log_not_held() {
+    local log_path="$1"
+    local resolved_log
+    resolved_log="$(readlink -f "$log_path" 2>/dev/null || true)"
+    if [ -z "$resolved_log" ]; then
+        return 0
+    fi
 
-# python -u test_classIL_task_prompt_other_metrics.py \
-#     --save_dir ./checkpoints/finetuned \
-#     --merge_model_path ./checkpoints/merged \
-#     --mode naive
+    local fd target pid state cmdline
+    for fd in /proc/[0-9]*/fd/1 /proc/[0-9]*/fd/2; do
+        [ -e "$fd" ] || continue
+        target="$(readlink -f "$fd" 2>/dev/null || true)"
+        [ "$target" = "$resolved_log" ] || continue
 
-# python -u test_classIL_task_prompt_other_metrics.py \
-#     --save_dir ./checkpoints/finetuned \
-#     --merge_model_path ./checkpoints/merged \
-#     --mode tcp
+        pid="${fd#/proc/}"
+        pid="${pid%%/*}"
+        [ "$pid" = "$$" ] && continue
 
-python -u test_classIL_task_prompt_other_metrics.py \
-    --config configs/default_reverse.yaml \
-    --save_dir ./checkpoints/finetuned_reverse \
-    --merge_model_path ./checkpoints/merged_reverse \
-    --mode naive \
-    2> >(tee /mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/logs/error.log >&2) \
-    > >(tee /mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/logs/result.log)
+        state="$(awk '/^State:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true)"
+        cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+        case "$cmdline" in
+            torch_shm_manager*) continue ;;
+        esac
+        echo "[ERROR] $log_path is already held by PID $pid state=$state cmd=$cmdline" >&2
+        echo "[ERROR] Refusing to reuse this log. Wait for the process to exit or use a different LOG_DIR." >&2
+        return 1
+    done
+}
 
-# python -u test_classIL_task_prompt_other_metrics.py \
-#    --config configs/default_reverse.yaml \
-#    --save_dir ./checkpoints/finetuned_reverse \
-#    --merge_model_path ./checkpoints/merged_reverse \
-#    --mode tcp
+run_with_tee() {
+    local result_log="$1"
+    local error_log="$2"
+    shift 2
+
+    echo "[INFO] running: $*"
+    echo "[INFO] result_log=$result_log"
+    echo "[INFO] error_log=$error_log"
+    check_log_not_held "$result_log"
+    check_log_not_held "$error_log"
+    "$@" 2> >(tee "$error_log" >&2) > >(tee "$result_log")
+}
+
+run_with_tee "$LOG_DIR/result_om_naive.log" "$LOG_DIR/error_om_naive.log" \
+    "$PYTHON_BIN" -u "$CLASSIL_WRAPPER" \
+        --entrypoint "$CLASSIL_OTHER_METRICS_ENTRYPOINT" \
+        --config "$CONFIG_FORWARD" \
+        --save_dir ./checkpoints/finetuned \
+        --merge_model_path ./checkpoints/merged \
+        --mode naive
+
+run_with_tee "$LOG_DIR/result_om_tcp.log" "$LOG_DIR/error_om_tcp.log" \
+    "$PYTHON_BIN" -u "$CLASSIL_WRAPPER" \
+        --entrypoint "$CLASSIL_OTHER_METRICS_ENTRYPOINT" \
+        --config "$CONFIG_FORWARD" \
+        --save_dir ./checkpoints/finetuned \
+        --merge_model_path ./checkpoints/merged \
+        --mode tcp
+
+run_with_tee "$LOG_DIR/result_om_naive_re.log" "$LOG_DIR/error_om_naive_re.log" \
+    "$PYTHON_BIN" -u "$CLASSIL_WRAPPER" \
+        --entrypoint "$CLASSIL_OTHER_METRICS_ENTRYPOINT" \
+        --config "$CONFIG_REVERSE" \
+        --save_dir ./checkpoints/finetuned_reverse \
+        --merge_model_path ./checkpoints/merged_reverse \
+        --mode naive
+
+run_with_tee "$LOG_DIR/result_om_tcp_re.log" "$LOG_DIR/error_om_tcp_re.log" \
+    "$PYTHON_BIN" -u "$CLASSIL_WRAPPER" \
+        --entrypoint "$CLASSIL_OTHER_METRICS_ENTRYPOINT" \
+        --config "$CONFIG_REVERSE" \
+        --save_dir ./checkpoints/finetuned_reverse \
+        --merge_model_path ./checkpoints/merged_reverse \
+        --mode tcp
+
+echo "[INFO] finished at $(date)"

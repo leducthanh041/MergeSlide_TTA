@@ -21,6 +21,7 @@ from tqdm import tqdm
 from transformers import AutoModel
 from omegaconf import OmegaConf
 
+from mergeslide_tta.checkpoint_mirror import save_checkpoint_with_mirror
 from mergeslide_tta.utils import (
     get_task_vector_norm,
     get_task_vector_state_dict,
@@ -281,13 +282,19 @@ def run_merging_for_fold(
 
         # Lưu intermediate checkpoint (dùng cho BWT/FWT evaluation)
         intermediate_path = output_dir / f"merged_task_{model_idx}.pth"
-        torch.save(merged_weight, intermediate_path)
-        print(f"[Fold {fold_id}] Task {model_idx} merged → {intermediate_path}")
+        primary_path, mirror_path = save_checkpoint_with_mirror(merged_weight, intermediate_path)
+        if mirror_path is not None:
+            print(f"[Fold {fold_id}] Task {model_idx} merged → {primary_path} | Mirror: {mirror_path}")
+        else:
+            print(f"[Fold {fold_id}] Task {model_idx} merged → {primary_path}")
 
     # Lưu final checkpoint (dùng cho Class-IL evaluation)
     final_path = output_dir / f"merged_final.pth"
-    torch.save(merged_weight, final_path)
-    print(f"[Fold {fold_id}] Final checkpoint → {final_path}")
+    primary_path, mirror_path = save_checkpoint_with_mirror(merged_weight, final_path)
+    if mirror_path is not None:
+        print(f"[Fold {fold_id}] Final checkpoint → {primary_path} | Mirror: {mirror_path}")
+    else:
+        print(f"[Fold {fold_id}] Final checkpoint → {primary_path}")
 
 
 # ---------------------------------------------------------------------------

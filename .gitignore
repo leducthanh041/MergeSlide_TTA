@@ -88,4 +88,8 @@ configs/default_eval_num_workers0.yaml
 scripts/test_classIL_tcp_num_workers0.sh
 scripts/test_classIL_tcp_pt_features_num_workers0.sh
 tools/
+scripts
+checkpoints
+checkpoints_nfs_backup_20260515_155917/
+logs
 
