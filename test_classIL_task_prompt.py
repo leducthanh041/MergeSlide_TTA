@@ -188,15 +188,13 @@ def eval_task_naive(
     all_class_embeddings: torch.Tensor,
     device,
     task_to_global_class: dict,
-    task_class_ranges: dict,
 ) -> tuple:
     """
     Naive inference:
-      y_pred = argmax(Z @ All_Class_Embeddings.T)
+      y_pred = argmax(Z @ All_Class_Embeddings)
 
-    all_class_embeddings: shape [EMBED_DIM, 13] — toàn bộ class embeddings.
-    Predict global class 0..12, sau đó map về local class của task_id
-    để tính metrics đúng.
+    Làm việc hoàn toàn trong global space (0..12) — không dùng local mapping,
+    không có fallback bug. pred_global và true_global đều là global class index.
     """
     preds_all           = []
     probs_all           = []
@@ -207,11 +205,12 @@ def eval_task_naive(
 
     ps = torch.tensor(TITAN_PS_ARG).int().to(device)
 
-    # Ánh xạ ngược: global class → local class của task_id
-    global_to_local = {v: k for k, v in task_to_global_class[task_id].items()}
-
-    # Class index range của task_id trong 13-class space
-    start, end      = task_class_ranges[task_id]
+    column_to_global = np.array([
+        task_to_global_class[t][local]
+        for t in range(len(task_to_global_class))
+        for local in sorted(task_to_global_class[t].keys())
+    ])
+    total_classes = len(column_to_global)
 
     with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
         for features, coords, label in tqdm(test_loader, leave=False):
@@ -222,27 +221,26 @@ def eval_task_naive(
 
             t0 = time.time()
 
-            # Naive: dot-product với toàn bộ 13 class embeddings
-            slide_embed  = model.backbone(features, coords, ps)
+            slide_embed   = model.backbone(features, coords, ps)
             logits_global = (slide_embed @ all_class_embeddings).float()  # [1, 13]
-            global_pred   = int(logits_global.argmax(1))
+            pred_column   = int(logits_global.argmax(1))
+            pred_global   = int(column_to_global[pred_column])            # luôn valid
+            true_global   = task_to_global_class[task_id][int(label)]
+
             times.append(time.time() - t0)
 
-            # Map global pred → local pred của task_id
-            # Nếu model predict class của task khác → local pred = -1 (sai)
-            local_pred = global_to_local.get(global_pred, -1)
+            # Probs: map từ column order sang global class order
+            probs_np  = nn.functional.softmax(logits_global, dim=1).cpu().numpy()[0]
+            probs_out = np.zeros((1, total_classes), dtype=np.float32)
+            for col_idx, g_idx in enumerate(column_to_global):
+                probs_out[0, g_idx] = probs_np[col_idx]
 
-            # Probs: lấy slice của task_id trong 13-class softmax
-            probs_global = nn.functional.softmax(logits_global, dim=1)
-            probs_local  = probs_global[:, start:end + 1]
+            preds_all.append(np.array([pred_global]))
+            probs_all.append(probs_out)
+            targets_all.append(np.array([true_global]))
 
-            preds_all.append(np.array([local_pred if local_pred >= 0 else 0]))
-            probs_all.append(probs_local.cpu().numpy())
-            targets_all.append(label.numpy())
-
-            g_label = task_to_global_class[task_id].get(int(label), -1)
-            convert_targets_all.append(np.array([g_label]))
-            convert_preds_all.append(np.array([global_pred]))
+            convert_preds_all.append(np.array([pred_global]))
+            convert_targets_all.append(np.array([true_global]))
 
     return _pack_results(
         preds_all, targets_all, probs_all,
@@ -398,7 +396,7 @@ if __name__ == "__main__":
                     test_loader, task_id, model,
                     all_class_embeddings, device,
                     task_to_global_class=seq_dataset.task_to_global_class,
-                    task_class_ranges=seq_dataset.task_class_ranges,
+                    #task_class_ranges=seq_dataset.task_class_ranges,
                 )
 
             results, preds_all, targets_all, probs_all, \

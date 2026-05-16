@@ -47,3 +47,80 @@ TASK_TO_GLOBAL_CLASS: dict[int, dict[int, int]] = {
 
 # Task names for logging
 TASK_NAMES: list[str] = ["BRCA", "RCC", "NSCLC", "ESCA", "TGCT", "CESC"]
+
+
+# ---------------------------------------------------------------------------
+# FORWARD aliases — rõ ràng hơn khi dùng cùng REVERSE
+# ---------------------------------------------------------------------------
+
+TASK_NAMES_FORWARD:           list[str]                 = TASK_NAMES
+NUM_CLASSES_FORWARD:          list[int]                 = NUM_CLASSES
+TASK_CLASS_RANGES_FORWARD:    dict[int, list[int]]      = TASK_CLASS_RANGES
+TASK_TO_GLOBAL_CLASS_FORWARD: dict[int, dict[int, int]] = TASK_TO_GLOBAL_CLASS
+
+# prompt_classifier luôn build theo FORWARD — dùng để init MLP weights trong build_model()
+CLASSIFIER_CLASS_RANGES_FORWARD: dict[int, list[int]] = TASK_CLASS_RANGES_FORWARD
+
+
+# ---------------------------------------------------------------------------
+# REVERSE order: C→T→E→N→R→B
+# ---------------------------------------------------------------------------
+
+TASK_NAMES_REVERSE: list[str] = ["CESC", "TGCT", "ESCA", "NSCLC", "RCC", "BRCA"]
+
+NUM_CLASSES_REVERSE: list[int] = [2, 2, 2, 2, 3, 2]
+
+TASK_CLASS_RANGES_REVERSE: dict[int, list[int]] = {
+    0: [0,  1],   # CESC: class0(0),  class1(1)
+    1: [2,  3],   # TGCT: class0(2),  class1(3)
+    2: [4,  5],   # ESCA: class0(4),  class1(5)
+    3: [6,  7],   # NSCLC: class0(6), class1(7)
+    4: [8,  10],  # RCC:  class0(8),  class1(9),  class2(10)
+    5: [11, 12],  # BRCA: class0(11), class1(12)
+}
+
+TASK_TO_GLOBAL_CLASS_REVERSE: dict[int, dict[int, int]] = {
+    0: {0: 0,  1: 1},
+    1: {0: 2,  1: 3},
+    2: {0: 4,  1: 5},
+    3: {0: 6,  1: 7},
+    4: {0: 8,  1: 9,  2: 10},
+    5: {0: 11, 1: 12},
+}
+
+
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
+
+def get_order_constants(order: str = "forward") -> tuple:
+    """
+    Trả về (task_names, num_classes, task_class_ranges, task_to_global_class)
+    theo order được chỉ định.
+
+    Args:
+        order: "forward" (B→R→N→E→T→C) hoặc "reverse" (C→T→E→N→R→B).
+
+    Returns:
+        Tuple gồm 4 constants tương ứng.
+
+    Raises:
+        ValueError: Nếu order không hợp lệ.
+    """
+    if order == "forward":
+        return (
+            TASK_NAMES_FORWARD,
+            NUM_CLASSES_FORWARD,
+            TASK_CLASS_RANGES_FORWARD,
+            TASK_TO_GLOBAL_CLASS_FORWARD,
+        )
+    if order == "reverse":
+        return (
+            TASK_NAMES_REVERSE,
+            NUM_CLASSES_REVERSE,
+            TASK_CLASS_RANGES_REVERSE,
+            TASK_TO_GLOBAL_CLASS_REVERSE,
+        )
+    raise ValueError(
+        f"Unknown order '{order}'. Expected 'forward' or 'reverse'."
+    )

@@ -163,31 +163,39 @@ def eval_task_naive(
     all_class_embeddings: torch.Tensor,
     device,
     task_to_global_class: dict,
-    task_class_ranges: dict,
     max_classes: int = None,
 ) -> tuple:
     """
     Naive inference:
-      y_pred = argmax(Z @ All_Class_Embeddings[:, :max_classes].T)
+      y_pred = argmax(Z @ All_Class_Embeddings[:, :max_classes])
 
-    max_classes: giới hạn class space về số class đã học,
-                 tránh naive compete với class chưa được train.
+    Làm việc hoàn toàn trong global space — không có fallback bug.
+    max_classes: giới hạn class space về số class đã học tại seq_task hiện tại.
+                 None = dùng toàn bộ (final eval).
     """
     preds_all   = []
     probs_all   = []
     targets_all = []
-    
-    effective_embeddings = (
-        all_class_embeddings[:, :max_classes]
-        if max_classes is not None
-        else all_class_embeddings
-    )
 
     ps = torch.tensor(TITAN_PS_ARG).int().to(device)
 
-    global_to_local = {v: k for k, v in task_to_global_class[task_id].items()}
-    start, end      = task_class_ranges[task_id]
-    
+    # Build column → global class mapping
+    column_to_global = np.array([
+        task_to_global_class[t][local]
+        for t in range(len(task_to_global_class))
+        for local in sorted(task_to_global_class[t].keys())
+    ])
+
+    # Slice theo max_classes nếu cần
+    if max_classes is not None:
+        effective_embeddings = all_class_embeddings[:, :max_classes]
+        effective_col_to_global = column_to_global[:max_classes]
+    else:
+        effective_embeddings = all_class_embeddings
+        effective_col_to_global = column_to_global
+
+    total_classes = len(column_to_global)
+
     with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
         for features, coords, label in tqdm(test_loader, leave=False):
             features = features.to(device)
@@ -197,16 +205,20 @@ def eval_task_naive(
 
             slide_embed   = model.backbone(features, coords, ps)
             logits_global = (slide_embed @ effective_embeddings).float()
-            global_pred   = int(logits_global.argmax(1))
-            local_pred    = global_to_local.get(global_pred, 0)
+            pred_column   = int(logits_global.argmax(1))
+            pred_global   = int(effective_col_to_global[pred_column])  # luôn valid
+            true_global   = task_to_global_class[task_id][int(label)]
 
-            probs_global = nn.functional.softmax(logits_global, dim=1)
-            probs_local  = probs_global[:, start:end + 1]
+            # Probs: map từ column order sang global class order
+            probs_np  = nn.functional.softmax(logits_global, dim=1).cpu().numpy()[0]
+            probs_out = np.zeros((1, total_classes), dtype=np.float32)
+            for col_idx, g_idx in enumerate(effective_col_to_global):
+                probs_out[0, g_idx] = probs_np[col_idx]
 
-            preds_all.append(np.array([local_pred]))
-            probs_all.append(probs_local.cpu().numpy())
-            targets_all.append(label.numpy())
-    
+            preds_all.append(np.array([pred_global]))
+            probs_all.append(probs_out)
+            targets_all.append(np.array([true_global]))
+
     return _pack_results(preds_all, targets_all, probs_all)
 
 def _pack_results(preds_all, targets_all, probs_all) -> tuple:
@@ -334,7 +346,7 @@ if __name__ == "__main__":
                 ).to(device)
                 base_model.vision_encoder.load_state_dict(backbone_state, strict=True)
             elif seq_task < num_tasks:
-                ckpt_name  = f"merged_task_{seq_task}.pth"
+                ckpt_name  = f"merged_task_{seq_task - 1}.pth"
                 merge_model_path = Path(args.merge_model_path) / fold / ckpt_name
                 base_model = AutoModel.from_pretrained(
                     "MahmoodLab/TITAN", trust_remote_code=True
@@ -374,7 +386,7 @@ if __name__ == "__main__":
                         test_loader, task_id, model,
                         all_class_embeddings, device,
                         task_to_global_class=seq_dataset.task_to_global_class,
-                        task_class_ranges=seq_dataset.task_class_ranges,
+                        #task_class_ranges=seq_dataset.task_class_ranges,
                         max_classes=sum(seq_dataset.num_classes[:seq_task]),
                     )
 

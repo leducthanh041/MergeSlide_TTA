@@ -18,7 +18,7 @@ import h5py
 import torch.nn.functional as F
 import numpy as np
 from typing import Tuple
-from mergeslide_tta.constants import NUM_CLASSES, TASK_NAMES
+from mergeslide_tta.constants import get_order_constants, CLASSIFIER_CLASS_RANGES_FORWARD
 
 class ContinualDataset:
     """
@@ -583,18 +583,18 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
             if order == 'reverse':
                 self.datasets   = list(reversed(self.datasets))
                 self.split_dirs = list(reversed(self.split_dirs))
-                # NUM_CLASSES cũng phải reverse theo
-                self.num_classes = list(reversed(NUM_CLASSES))
-                self.task_names  = list(reversed(TASK_NAMES))
-            else:
-                self.num_classes = list(NUM_CLASSES)
-                self.task_names  = list(TASK_NAMES)
+            
+            (task_names, num_classes,
+             task_class_ranges, task_to_global_class) = get_order_constants(order)
+            self.task_names  = list(task_names)
+            self.num_classes = list(num_classes)
         else:
             self._init_hardcoded()
             # Fallback về giá trị gốc
             self.batch_size  = 1
             self.num_workers = 4
         
+        self._order = order
         self._build_class_mappings()
 
     # ------------------------------------------------------------------
@@ -747,40 +747,31 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
         return train_loader, val_loader, test_loaders
 
     def _build_class_mappings(self):
-        """
-        Build TASK_CLASS_RANGES và TASK_TO_GLOBAL_CLASS
-        theo đúng thứ tự hiện tại của self.num_classes.
-        """
-        task_class_ranges   = {}
-        task_to_global_class = {}
-        start = 0
-        for task_id, n in enumerate(self.num_classes):
-            end = start + n - 1
-            task_class_ranges[task_id] = [start, end]
-            task_to_global_class[task_id] = {
-                local: global_
-                for local, global_ in enumerate(range(start, end + 1))
-            }
-            start = end + 1
-        self.task_class_ranges    = task_class_ranges
-        self.task_to_global_class = task_to_global_class
-
-        # THÊM ĐOẠN NÀY:
-        # prompt_classifier luôn build theo thứ tự FORWARD
-        # cần map task_id hiện tại → đúng slice trong classifier
-        _FORWARD_NAMES = ["BRCA", "RCC", "NSCLC", "ESCA", "TGCT", "CESC"]
-        _FORWARD_CLASS_RANGES = {
-            0: [0,  1],
-            1: [2,  4],
-            2: [5,  6],
-            3: [7,  8],
-            4: [9,  10],
-            5: [11, 12],
-        }
-        self.classifier_class_ranges = {
-            task_id: _FORWARD_CLASS_RANGES[_FORWARD_NAMES.index(name)]
-            for task_id, name in enumerate(self.task_names)
-        }
+      """
+      Load TASK_CLASS_RANGES và TASK_TO_GLOBAL_CLASS từ constants.py
+      theo order hiện tại, sau đó verify bằng dynamic computation.
+      """
+      order = getattr(self, "_order", "forward")
+      (_, _, task_class_ranges, task_to_global_class) = get_order_constants(order)
+  
+      self.task_class_ranges    = dict(task_class_ranges)
+      self.task_to_global_class = dict(task_to_global_class)
+  
+      # Verify: dynamic computation phải khớp với constants
+      _start = 0
+      for task_id, n in enumerate(self.num_classes):
+          _end = _start + n - 1
+          assert self.task_class_ranges[task_id] == [_start, _end], (
+              f"task_class_ranges mismatch task {task_id}: "
+              f"constants={self.task_class_ranges[task_id]} vs computed=[{_start},{_end}]"
+          )
+          assert self.task_to_global_class[task_id] == {
+              local: global_ for local, global_ in enumerate(range(_start, _end + 1))
+          }, f"task_to_global_class mismatch task {task_id}"
+          _start = _end + 1
+  
+      # classifier_class_ranges: luôn theo FORWARD — dùng để init MLP từ prompt_classifier
+      self.classifier_class_ranges = dict(CLASSIFIER_CLASS_RANGES_FORWARD)
         
 if __name__ == '__main__':
     seq_dataset = Sequential_Generic_MIL_Dataset()
