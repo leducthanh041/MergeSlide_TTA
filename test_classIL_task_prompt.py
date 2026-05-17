@@ -37,8 +37,8 @@ from tqdm import tqdm
 from transformers import AutoModel
 
 from mergeslide_tta.constants import (
-    EMBED_DIM, K_PATCHES, NUM_CLASSES, NUM_TASKS,
-    TASK_CLASS_RANGES, TASK_TO_GLOBAL_CLASS, TITAN_PS_ARG,
+    EMBED_DIM, K_PATCHES, NUM_TASKS,
+    TITAN_PS_ARG,
 )
 from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
 from mergeslide_tta.metrics import pad_numpy_arrays
@@ -414,10 +414,17 @@ if __name__ == "__main__":
 
             if len(probs_all.shape) == 3:
                 probs_all = probs_all.squeeze(1)
-            for i in range(num_classes[task_id]):
-                all_aucs.append(
-                    roc_auc_score((targets_all == i).astype(int), probs_all[:, i])
-                )
+            if args.mode == "tcp":
+                for i in range(num_classes[task_id]):           # local index
+                    all_aucs.append(
+                        roc_auc_score((targets_all == i).astype(int), probs_all[:, i])
+                    )
+            else:   # naive: targets_all là global index
+                global_idxs = sorted(seq_dataset.task_to_global_class[task_id].values())
+                for g_idx in global_idxs:
+                    all_aucs.append(
+                        roc_auc_score((targets_all == g_idx).astype(int), probs_all[:, g_idx])
+                    )
 
         all_preds_g   = np.concatenate(all_preds_g)
         all_targets_g = np.concatenate(all_targets_g)

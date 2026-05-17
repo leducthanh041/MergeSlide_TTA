@@ -29,8 +29,8 @@ from tqdm import tqdm
 from transformers import AutoModel
 
 from mergeslide_tta.constants import (
-    EMBED_DIM, K_PATCHES, NUM_CLASSES, NUM_TASKS,
-    TASK_CLASS_RANGES, TASK_TO_GLOBAL_CLASS, TITAN_PS_ARG,
+    EMBED_DIM, K_PATCHES, NUM_TASKS,
+    TITAN_PS_ARG,
 )
 from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
 from mergeslide_tta.metrics import backward_transfer, forgetting, pad_numpy_arrays

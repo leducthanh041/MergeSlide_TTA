@@ -25,8 +25,8 @@ from tqdm import tqdm
 from transformers import AutoModel
 
 from mergeslide_tta.constants import (
-    EMBED_DIM, K_PATCHES, NUM_CLASSES, NUM_TASKS,
-    TASK_NAMES, TITAN_PS_ARG,
+    EMBED_DIM, K_PATCHES, NUM_TASKS,
+    TITAN_PS_ARG,
 )
 from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
 from mergeslide_tta.metrics import pad_numpy_arrays
@@ -91,6 +91,7 @@ def eval_task(
     model: CustomSequential,
     task_id: int,
     device: str,
+    num_classes: list,
 ) -> tuple:
     """
     Task-IL inference: gọi thẳng model với MLP head đúng task đã gắn sẵn.
@@ -215,7 +216,7 @@ if __name__ == "__main__":
 
             _, _, test_loader = seq_dataset.get_data_loaders(fold_id, task_id)
             results, preds_all, targets_all = eval_task(
-                test_loader, model, task_id, device
+                test_loader, model, task_id, device, num_classes
             )
 
             num_correct += sum(preds_all == targets_all)
