@@ -78,6 +78,7 @@ configs/.nfs00000000153fec1c00000397
 .agents/
 AGENTS.md
 checkpoints_test/
+checkpoints_ood/
 datasets_py_explanation_vi.md
 
 .nfs00000000153d22a8000003d0
@@ -92,3 +93,6 @@ checkpoints
 checkpoints_nfs_backup_20260515_155917/
 logs
 related_work
+
+tune_tta_grid_search.sh
+tune_tta_grid_search.py
