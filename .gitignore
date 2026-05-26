@@ -80,7 +80,7 @@ AGENTS.md
 checkpoints_test/
 checkpoints_ood/
 datasets_py_explanation_vi.md
-
+.nfs00000000122e0790000005a1
 .nfs00000000153d22a8000003d0
 configs/.nfs0000000011033594000003cf
 configs/.nfs00000000153fed51000003ce
@@ -100,3 +100,4 @@ tune_tta_grid_search.py
 old_code_tta
 tta_losses.py
 tta_adapter.py
+old_scripts_tta
