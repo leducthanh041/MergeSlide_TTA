@@ -160,65 +160,71 @@ def eval_task_naive(
     test_loader,
     task_id: int,
     model: CustomSequential,
-    all_class_embeddings: torch.Tensor,
+    task_model_paths: list,
+    num_classes: list,
     device,
     task_to_global_class: dict,
-    max_classes: int = None,
 ) -> tuple:
     """
-    Naive inference:
-      y_pred = argmax(Z @ All_Class_Embeddings[:, :max_classes])
-
-    Làm việc hoàn toàn trong global space — không có fallback bug.
-    max_classes: giới hạn class space về số class đã học tại seq_task hiện tại.
-                 None = dùng toàn bộ (final eval).
+    Naive inference (giống test_classIL_meanACC.py gốc):
+      - Build merged MLP head bằng cách cat weights của các per-task MLP đã học.
+      - y_pred = argmax(merged_mlp(Z))  →  global class index
+      - Label được convert sang global space qua task_to_global_class.
+ 
+    task_model_paths và num_classes đã được slice đến seq_task trước khi gọi hàm này,
+    nên merged MLP có shape Linear(768, sum(num_classes[:seq_task])).
     """
     preds_all   = []
     probs_all   = []
     targets_all = []
-
-    ps = torch.tensor(TITAN_PS_ARG).int().to(device)
-
-    # Build column → global class mapping
+ 
+    ps            = torch.tensor(TITAN_PS_ARG).int().to(device)
+    total_classes = sum(num_classes)
+ 
+    # Build merged MLP: cat per-task weights theo thứ tự task
+    mlp_task_weights = []
+    for p in task_model_paths:
+        state = torch.load(p, map_location="cpu")
+        mlp_task_weights.append(
+            {k.split("mlp.")[-1]: state[k] for k in list(state.keys())[-2:]}
+        )
+    merged_mlp_state = {
+        "weight": torch.cat([w["weight"] for w in mlp_task_weights], dim=0),
+        "bias":   torch.cat([w["bias"]   for w in mlp_task_weights], dim=0),
+    }
+    merged_mlp = nn.Linear(EMBED_DIM, total_classes).to(device)
+    merged_mlp.load_state_dict(merged_mlp_state)
+    merged_mlp.eval()
+ 
+    # column_to_global: column i của merged MLP output → global class index
     column_to_global = np.array([
         task_to_global_class[t][local]
-        for t in range(len(task_to_global_class))
+        for t in range(len(task_model_paths))
         for local in sorted(task_to_global_class[t].keys())
     ])
-
-    # Slice theo max_classes nếu cần
-    if max_classes is not None:
-        effective_embeddings = all_class_embeddings[:, :max_classes]
-        effective_col_to_global = column_to_global[:max_classes]
-    else:
-        effective_embeddings = all_class_embeddings
-        effective_col_to_global = column_to_global
-
-    total_classes = len(column_to_global)
-
+ 
     with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
         for features, coords, label in tqdm(test_loader, leave=False):
             features = features.to(device)
             coords   = coords.long().to(device)
             idx      = torch.randperm(features.shape[0])[:K_PATCHES]
             features, coords = features[idx], coords[idx]
-
-            slide_embed   = model.backbone(features, coords, ps)
-            logits_global = (slide_embed @ effective_embeddings).float()
-            pred_column   = int(logits_global.argmax(1))
-            pred_global   = int(effective_col_to_global[pred_column])  # luôn valid
-            true_global   = task_to_global_class[task_id][int(label)]
-
-            # Probs: map từ column order sang global class order
-            probs_np  = nn.functional.softmax(logits_global, dim=1).cpu().numpy()[0]
-            probs_out = np.zeros((1, total_classes), dtype=np.float32)
-            for col_idx, g_idx in enumerate(effective_col_to_global):
+ 
+            slide_embed = model.backbone(features, coords, ps)
+            logits      = merged_mlp(slide_embed.float())   # [1, total_classes]
+            pred_column = int(logits.argmax(1))
+            pred_global = int(column_to_global[pred_column])
+            true_global = task_to_global_class[task_id][int(label)]
+ 
+            probs_np  = nn.functional.softmax(logits, dim=1).cpu().numpy()[0]
+            probs_out = np.zeros((1, sum(num_classes)), dtype=np.float32)
+            for col_idx, g_idx in enumerate(column_to_global):
                 probs_out[0, g_idx] = probs_np[col_idx]
-
+ 
             preds_all.append(np.array([pred_global]))
             probs_all.append(probs_out)
             targets_all.append(np.array([true_global]))
-
+ 
     return _pack_results(preds_all, targets_all, probs_all)
 
 def _pack_results(preds_all, targets_all, probs_all) -> tuple:
@@ -307,7 +313,6 @@ if __name__ == "__main__":
         all_class_embeddings = None
     else:
         task_prompts         = None
-        all_class_embeddings = build_class_embeddings(device, seq_dataset.task_names)
 
     mACCs_all_folds        = []
     fgt_all_folds          = []
@@ -384,10 +389,10 @@ if __name__ == "__main__":
                 else:
                     _, preds_all, targets_all = eval_task_naive(
                         test_loader, task_id, model,
-                        all_class_embeddings, device,
+                        task_model_paths[:seq_task],
+                        num_classes[:seq_task],
+                        device,
                         task_to_global_class=seq_dataset.task_to_global_class,
-                        #task_class_ranges=seq_dataset.task_class_ranges,
-                        max_classes=sum(seq_dataset.num_classes[:seq_task]),
                     )
 
                 num_correct += sum(preds_all == targets_all)

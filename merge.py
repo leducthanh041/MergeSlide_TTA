@@ -308,6 +308,10 @@ if __name__ == "__main__":
                         help="Override fold start (default: 0 từ config)")
     parser.add_argument("--fold_end",   type=int, default=None,
                         help="Override fold end (default: num_folds từ config)")
+    parser.add_argument("--finetuned_checkpoints", type=str, default=None,
+                        help="Override cfg.paths.finetuned_checkpoints")
+    parser.add_argument("--merged_checkpoints", type=str, default=None,
+                        help="Override cfg.paths.merged_checkpoints")
     args = parser.parse_args()
 
     cfg        = OmegaConf.load(args.config)
@@ -315,8 +319,11 @@ if __name__ == "__main__":
     fold_end   = args.fold_end   if args.fold_end   is not None else cfg.training.num_folds
     num_tasks  = cfg.training.num_tasks     # thêm field này vào default.yaml
 
-    src_dir = cfg.paths.finetuned_checkpoints
-    dst_dir = cfg.paths.merged_checkpoints
+    src_dir = args.finetuned_checkpoints or cfg.paths.finetuned_checkpoints
+    dst_dir = args.merged_checkpoints or cfg.paths.merged_checkpoints
+
+    print(f"[INFO] finetuned checkpoints: {src_dir}")
+    print(f"[INFO] merged checkpoints: {dst_dir}")
 
     print("Loading TITAN base model ...")
     base_model = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)

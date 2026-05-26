@@ -19,7 +19,8 @@ USER_NAME="${USER:-thanhld}"
 PROJECT_NAME="$(basename "$PROJECT_ROOT")"
 export MERGESLIDE_LOCAL_ROOT="${MERGESLIDE_LOCAL_ROOT:-/docker/data/$USER_NAME/$PROJECT_NAME}"
 LOG_DIR="${LOG_DIR:-logs}"
-CONFIG_FORWARD="${CONFIG_FORWARD:-configs/default_eval_num_workers0.yaml}"
+#CONFIG_FORWARD="${CONFIG_FORWARD:-configs/default_eval_num_workers0.yaml}"
+CONFIG_FORWARD="${CONFIG_FORWARD:-configs/default_ood_eval_num_workers0.yaml}"
 CONFIG_REVERSE="${CONFIG_REVERSE:-configs/default_reverse_eval_num_workers0.yaml}"
 PT_FEATURE_WRAPPER="${PT_FEATURE_WRAPPER:-tools/run_classil_with_pt_features.py}"
 TASKIL_ENTRYPOINT="${TASKIL_ENTRYPOINT:-test_taskIL.py}"
@@ -123,14 +124,14 @@ run_to_logs "$LOG_DIR/result_test_taskIL.log" "$LOG_DIR/error_test_taskIL.log" \
     "$PYTHON_BIN" -u "$PT_FEATURE_WRAPPER" \
         --entrypoint "$TASKIL_ENTRYPOINT" \
         --config "$CONFIG_FORWARD" \
-        --save_dir ./checkpoints/finetuned \
-        --merge_model_path ./checkpoints/merged
+        --save_dir ./checkpoints_ood/finetuned \
+        --merge_model_path ./checkpoints_ood/merged
 
-run_to_logs "$LOG_DIR/result_test_taskIL_re.log" "$LOG_DIR/error_test_taskIL_re.log" \
-    "$PYTHON_BIN" -u "$PT_FEATURE_WRAPPER" \
-        --entrypoint "$TASKIL_ENTRYPOINT" \
-        --config "$CONFIG_REVERSE" \
-        --save_dir ./checkpoints/finetuned_reverse \
-        --merge_model_path ./checkpoints/merged_reverse
+#run_to_logs "$LOG_DIR/result_test_taskIL_re.log" "$LOG_DIR/error_test_taskIL_re.log" \
+#    "$PYTHON_BIN" -u "$PT_FEATURE_WRAPPER" \
+#        --entrypoint "$TASKIL_ENTRYPOINT" \
+#        --config "$CONFIG_REVERSE" \
+#        --save_dir ./checkpoints/finetuned_reverse \
+#        --merge_model_path ./checkpoints/merged_reverse
 
 echo "[INFO] finished at $(date)"

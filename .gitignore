@@ -96,3 +96,7 @@ related_work
 
 tune_tta_grid_search.sh
 tune_tta_grid_search.py
+
+old_code_tta
+tta_losses.py
+tta_adapter.py

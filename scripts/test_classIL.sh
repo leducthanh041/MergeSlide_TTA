@@ -20,6 +20,7 @@ PROJECT_NAME="$(basename "$PROJECT_ROOT")"
 export MERGESLIDE_LOCAL_ROOT="${MERGESLIDE_LOCAL_ROOT:-/docker/data/$USER_NAME/$PROJECT_NAME}"
 LOG_DIR="${LOG_DIR:-logs}"
 CONFIG_FORWARD="${CONFIG_FORWARD:-configs/default_eval_num_workers0.yaml}"
+#CONFIG_FORWARD="${CONFIG_FORWARD:-configs/default_ood_eval_num_workers0.yaml}"
 CONFIG_REVERSE="${CONFIG_REVERSE:-configs/default_reverse_eval_num_workers0.yaml}"
 CLASSIL_ENTRYPOINT="${CLASSIL_ENTRYPOINT:-tools/run_classil_with_pt_features.py}"
 
@@ -117,12 +118,12 @@ run_to_logs() {
     "$@" >> "$result_log" 2>> "$error_log"
 }
 
-run_to_logs "$LOG_DIR/result_test_class_tcp.log" "$LOG_DIR/error_test_class_tcp.log" \
-    "$PYTHON_BIN" -u "$CLASSIL_ENTRYPOINT" \
-        --config "$CONFIG_FORWARD" \
-        --save_dir ./checkpoints/finetuned \
-        --merge_model_path ./checkpoints/merged \
-        --mode tcp
+#run_to_logs "$LOG_DIR/result_test_class_tcp.log" "$LOG_DIR/error_test_class_tcp.log" \
+#    "$PYTHON_BIN" -u "$CLASSIL_ENTRYPOINT" \
+#        --config "$CONFIG_FORWARD" \
+#        --save_dir ./checkpoints_ood/finetuned \
+#        --merge_model_path ./checkpoints_ood/merged \
+#        --mode tcp
 
 run_to_logs "$LOG_DIR/result_test_class_naive.log" "$LOG_DIR/error_test_class_naive.log" \
     "$PYTHON_BIN" -u "$CLASSIL_ENTRYPOINT" \
@@ -131,12 +132,12 @@ run_to_logs "$LOG_DIR/result_test_class_naive.log" "$LOG_DIR/error_test_class_na
         --merge_model_path ./checkpoints/merged \
         --mode naive
 
-run_to_logs "$LOG_DIR/result_test_class_tcp_re.log" "$LOG_DIR/error_test_class_tcp_re.log" \
-    "$PYTHON_BIN" -u "$CLASSIL_ENTRYPOINT" \
-        --config "$CONFIG_REVERSE" \
-        --save_dir ./checkpoints/finetuned_reverse \
-        --merge_model_path ./checkpoints/merged_reverse \
-        --mode tcp
+#run_to_logs "$LOG_DIR/result_test_class_tcp_re.log" "$LOG_DIR/error_test_class_tcp_re.log" \
+#    "$PYTHON_BIN" -u "$CLASSIL_ENTRYPOINT" \
+#        --config "$CONFIG_REVERSE" \
+#        --save_dir ./checkpoints/finetuned_reverse \
+#        --merge_model_path ./checkpoints/merged_reverse \
+#        --mode tcp
 
 run_to_logs "$LOG_DIR/result_test_class_naive_re.log" "$LOG_DIR/error_test_class_naive_re.log" \
     "$PYTHON_BIN" -u "$CLASSIL_ENTRYPOINT" \

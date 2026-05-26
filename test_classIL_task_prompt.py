@@ -43,10 +43,7 @@ from mergeslide_tta.constants import (
 from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
 from mergeslide_tta.metrics import pad_numpy_arrays
 from mergeslide_tta.model import CustomSequential
-from mergeslide_tta.prompts_zeroshot import (
-    brca_prompts, rcc_prompts, nsclc_prompts,
-    esca_prompts, tgct_prompts, cesc_prompts,
-)
+
 from mergeslide_tta.utils import get_eval_metrics, seed_torch
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -101,14 +98,6 @@ def resolve_hot_path(path: str, local_root: Path) -> Path:
         return local_root.joinpath(*parts)
     return raw_path
 
-_PROMPT_FN_MAP = {
-    "BRCA":  brca_prompts,
-    "RCC":   rcc_prompts,
-    "NSCLC": nsclc_prompts,
-    "ESCA":  esca_prompts,
-    "TGCT":  tgct_prompts,
-    "CESC":  cesc_prompts,
-}
 
 # ---------------------------------------------------------------------------
 # Inference functions
@@ -185,16 +174,20 @@ def eval_task_naive(
     test_loader,
     task_id: int,
     model: CustomSequential,
-    all_class_embeddings: torch.Tensor,
+    task_model_paths: list,
+    num_classes: list,
     device,
     task_to_global_class: dict,
 ) -> tuple:
     """
-    Naive inference:
-      y_pred = argmax(Z @ All_Class_Embeddings)
-
-    Làm việc hoàn toàn trong global space (0..12) — không dùng local mapping,
-    không có fallback bug. pred_global và true_global đều là global class index.
+    Naive inference (giống test_classIL.py gốc):
+      - Build merged MLP head bằng cách cat weights của tất cả per-task MLP.
+      - y_pred = argmax(merged_mlp(Z))  →  global class index  [0..12]
+      - Label được convert sang global space qua task_to_global_class.
+ 
+    Không dùng text embeddings. Merged MLP có shape Linear(768, sum(num_classes)).
+    Column i của output tương ứng trực tiếp với global class i theo thứ tự
+    ghép nối của task_to_global_class.
     """
     preds_all           = []
     probs_all           = []
@@ -202,46 +195,62 @@ def eval_task_naive(
     convert_preds_all   = []
     convert_targets_all = []
     times               = []
-
-    ps = torch.tensor(TITAN_PS_ARG).int().to(device)
-
+ 
+    ps             = torch.tensor(TITAN_PS_ARG).int().to(device)
+    total_classes  = sum(num_classes)
+ 
+    # Build merged MLP: cat per-task weights theo thứ tự task
+    mlp_task_weights = []
+    for p in task_model_paths:
+        state = torch.load(p, map_location="cpu")
+        mlp_task_weights.append(
+            {k.split("mlp.")[-1]: state[k] for k in list(state.keys())[-2:]}
+        )
+    merged_mlp_state = {
+        "weight": torch.cat([w["weight"] for w in mlp_task_weights], dim=0),
+        "bias":   torch.cat([w["bias"]   for w in mlp_task_weights], dim=0),
+    }
+    merged_mlp = nn.Linear(EMBED_DIM, total_classes).to(device)
+    merged_mlp.load_state_dict(merged_mlp_state)
+    merged_mlp.eval()
+ 
+    # column_to_global: column i của merged MLP output → global class index
+    # (built từ task_to_global_class, theo đúng thứ tự ghép nối weights)
     column_to_global = np.array([
         task_to_global_class[t][local]
         for t in range(len(task_to_global_class))
         for local in sorted(task_to_global_class[t].keys())
     ])
-    total_classes = len(column_to_global)
-
+ 
     with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
         for features, coords, label in tqdm(test_loader, leave=False):
             features = features.to(device)
             coords   = coords.long().to(device)
             idx      = torch.randperm(features.shape[0])[:K_PATCHES]
             features, coords = features[idx], coords[idx]
-
+ 
             t0 = time.time()
-
+ 
             slide_embed   = model.backbone(features, coords, ps)
-            logits_global = (slide_embed @ all_class_embeddings).float()  # [1, 13]
-            pred_column   = int(logits_global.argmax(1))
-            pred_global   = int(column_to_global[pred_column])            # luôn valid
+            logits        = merged_mlp(slide_embed.float())        # [1, total_classes]
+            pred_column   = int(logits.argmax(1))
+            pred_global   = int(column_to_global[pred_column])
             true_global   = task_to_global_class[task_id][int(label)]
-
+ 
             times.append(time.time() - t0)
-
-            # Probs: map từ column order sang global class order
-            probs_np  = nn.functional.softmax(logits_global, dim=1).cpu().numpy()[0]
+ 
+            probs_np  = nn.functional.softmax(logits, dim=1).cpu().numpy()[0]
             probs_out = np.zeros((1, total_classes), dtype=np.float32)
             for col_idx, g_idx in enumerate(column_to_global):
                 probs_out[0, g_idx] = probs_np[col_idx]
-
+ 
             preds_all.append(np.array([pred_global]))
             probs_all.append(probs_out)
             targets_all.append(np.array([true_global]))
-
+ 
             convert_preds_all.append(np.array([pred_global]))
             convert_targets_all.append(np.array([true_global]))
-
+ 
     return _pack_results(
         preds_all, targets_all, probs_all,
         convert_preds_all, convert_targets_all, times,
@@ -342,7 +351,6 @@ if __name__ == "__main__":
         all_class_embeddings = None
     else:
         task_prompts        = None
-        all_class_embeddings = build_class_embeddings(device, seq_dataset.task_names)
 
     print("Loading TITAN base model ...")
     base_model = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
@@ -394,9 +402,8 @@ if __name__ == "__main__":
             else:
                 result = eval_task_naive(
                     test_loader, task_id, model,
-                    all_class_embeddings, device,
+                    task_model_paths, num_classes, device,
                     task_to_global_class=seq_dataset.task_to_global_class,
-                    #task_class_ranges=seq_dataset.task_class_ranges,
                 )
 
             results, preds_all, targets_all, probs_all, \

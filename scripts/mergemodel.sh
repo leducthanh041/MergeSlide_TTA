@@ -76,6 +76,7 @@ mkdir -p "$LOG_DIR"
 export TMPDIR="${TMPDIR:-$MERGESLIDE_LOCAL_ROOT/tmp}"
 export SQLITE_TMPDIR="${SQLITE_TMPDIR:-$MERGESLIDE_LOCAL_ROOT/sqlite}"
 export HDF5_USE_FILE_LOCKING="${HDF5_USE_FILE_LOCKING:-FALSE}"
+export MERGESLIDE_DISABLE_CHECKPOINT_MIRROR="${MERGESLIDE_DISABLE_CHECKPOINT_MIRROR:-1}"
 
 # ---------------------------------------------------------------------------
 # Logging info
@@ -87,6 +88,7 @@ echo "[INFO] local_hot_root=$MERGESLIDE_LOCAL_ROOT"
 echo "[INFO] config=$CONFIG"
 echo "[INFO] finetuned_dir=$FINETUNED_DIR"
 echo "[INFO] merged_dir=$MERGED_DIR  (merged checkpoints saved to docker)"
+echo "[INFO] checkpoint_mirror_disabled=$MERGESLIDE_DISABLE_CHECKPOINT_MIRROR"
 echo "[INFO] merge_entrypoint=$MERGE_ENTRYPOINT"
 
 # ---------------------------------------------------------------------------
@@ -138,7 +140,9 @@ run_to_logs \
     "$LOG_DIR/error_merge_ood.log" \
     "$PYTHON_BIN" -u "$CLASSIL_WRAPPER" \
         --entrypoint                    "$MERGE_ENTRYPOINT" \
-        --config                        "$CONFIG"
+        --config                        "$CONFIG" \
+        --finetuned_checkpoints         "$FINETUNED_DIR" \
+        --merged_checkpoints            "$MERGED_DIR"
 
 echo "[INFO] Merge finished at $(date)"
 echo "[INFO] Merged checkpoints saved to: $MERGED_DIR"
