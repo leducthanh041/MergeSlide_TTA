@@ -21,6 +21,7 @@ Cấu trúc checkpoint kỳ vọng:
     Merged    : {merge_model_path}/fold_{id}/merged_final.pth
 """
 import argparse
+import csv
 import os
 import time
 from pathlib import Path
@@ -111,6 +112,11 @@ def eval_task_tcp(
     task_prompts: torch.Tensor,
     task_model_paths: list,
     device,
+    seq_dataset: Sequential_Generic_MIL_Dataset,
+    fold_id: int,
+    debug_route: bool = False,
+    debug_route_topk: int = 3,
+    debug_rows: list | None = None,
 ) -> tuple:
     """
     TCP inference:
@@ -123,6 +129,12 @@ def eval_task_tcp(
     convert_preds_all   = []
     convert_targets_all = []
     times               = []
+    route_correct       = 0
+    strict_global_correct = 0
+    legacy_global_correct = 0
+    route_counts        = np.zeros(task_prompts.shape[0], dtype=np.int64)
+    route_margins       = []
+    route_score_sums    = np.zeros(task_prompts.shape[0], dtype=np.float64)
 
     ps = torch.tensor(TITAN_PS_ARG).int().to(device)
 
@@ -135,7 +147,7 @@ def eval_task_tcp(
         )
 
     with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
-        for features, coords, label in tqdm(test_loader, leave=False):
+        for sample_idx, (features, coords, label) in enumerate(tqdm(test_loader, leave=False)):
             features = features.to(device)
             coords   = coords.long().to(device)
             idx      = torch.randperm(features.shape[0])[:K_PATCHES]
@@ -145,7 +157,19 @@ def eval_task_tcp(
 
             # Bước 1: task routing
             slide_embed  = model.backbone(features, coords, ps)
-            pred_task_id = int(torch.argmax(slide_embed @ task_prompts.T))
+            route_logits = (slide_embed.float() @ task_prompts.float().T).squeeze(0)
+            pred_task_id = int(torch.argmax(route_logits).item())
+            topk = min(debug_route_topk, route_logits.numel())
+            top_vals, top_ids = torch.topk(route_logits, k=topk)
+            route_margin = 0.0
+            if topk > 1:
+                route_margin = float((top_vals[0] - top_vals[1]).detach().cpu())
+
+            label_int = int(label)
+            route_correct += int(pred_task_id == task_id)
+            route_counts[pred_task_id] += 1
+            route_margins.append(route_margin)
+            route_score_sums += route_logits.detach().float().cpu().numpy()
 
             # Bước 2: class prediction via MLP head của task dự đoán
             mlp = nn.Linear(EMBED_DIM, num_classes[pred_task_id]).to(device)
@@ -159,10 +183,65 @@ def eval_task_tcp(
             probs_all.append(probs.cpu().numpy())
             targets_all.append(label.numpy())
 
-            g_label = seq_dataset.task_to_global_class[task_id].get(int(label), -1)
+            g_label = seq_dataset.task_to_global_class[task_id].get(label_int, -1)
+            # Legacy mapping keeps the original script behavior for reported metrics.
+            # Routed mapping exposes the strict Class-IL effect of task routing.
             g_pred  = seq_dataset.task_to_global_class[task_id].get(pred, -1)
+            routed_g_pred = seq_dataset.task_to_global_class[pred_task_id].get(pred, -1)
+            legacy_global_correct += int(g_pred == g_label)
+            strict_global_correct += int(routed_g_pred == g_label)
             convert_targets_all.append(np.array([g_label]))
             convert_preds_all.append(np.array([g_pred]))
+
+            if debug_route and debug_rows is not None:
+                row = {
+                    "fold": fold_id,
+                    "task_id": task_id,
+                    "task_name": seq_dataset.task_names[task_id],
+                    "sample_idx": sample_idx,
+                    "true_local_label": label_int,
+                    "true_global_label": g_label,
+                    "pred_task_id": pred_task_id,
+                    "pred_task_name": seq_dataset.task_names[pred_task_id],
+                    "route_correct": int(pred_task_id == task_id),
+                    "pred_local_label": pred,
+                    "legacy_global_pred": g_pred,
+                    "routed_global_pred": routed_g_pred,
+                    "legacy_global_correct": int(g_pred == g_label),
+                    "routed_global_correct": int(routed_g_pred == g_label),
+                    "route_margin": route_margin,
+                }
+                for rank, (route_id, route_score) in enumerate(zip(top_ids, top_vals), start=1):
+                    route_id_int = int(route_id.item())
+                    row[f"top{rank}_task_id"] = route_id_int
+                    row[f"top{rank}_task_name"] = seq_dataset.task_names[route_id_int]
+                    row[f"top{rank}_score"] = float(route_score.detach().cpu())
+                debug_rows.append(row)
+
+    if debug_route:
+        n_samples = max(1, len(test_loader))
+        avg_scores = route_score_sums / n_samples
+        route_dist = ", ".join(
+            f"{seq_dataset.task_names[t]}={route_counts[t]}"
+            for t in range(len(route_counts))
+            if route_counts[t] > 0
+        )
+        avg_score_text = ", ".join(
+            f"{seq_dataset.task_names[t]}={avg_scores[t]:.4f}"
+            for t in range(len(avg_scores))
+        )
+        print(
+            f"[ROUTE][Fold {fold_id}][Task {task_id} {seq_dataset.task_names[task_id]}] "
+            f"route_acc={route_correct/n_samples*100:.2f}% "
+            f"legacy_global_acc={legacy_global_correct/n_samples*100:.2f}% "
+            f"strict_routed_global_acc={strict_global_correct/n_samples*100:.2f}% "
+            f"avg_margin={np.mean(route_margins) if route_margins else 0.0:.4f} "
+            f"route_dist={{ {route_dist} }}"
+        )
+        print(
+            f"[ROUTE][Fold {fold_id}][Task {task_id} {seq_dataset.task_names[task_id]}] "
+            f"avg_route_scores={{ {avg_score_text} }}"
+        )
 
     return _pack_results(
         preds_all, targets_all, probs_all,
@@ -326,14 +405,35 @@ if __name__ == "__main__":
     parser.add_argument("--mode",             type=str, default="tcp",
                         choices=["tcp", "naive"],
                         help="tcp (default): TCP inference | naive: direct class inference")
+    parser.add_argument(
+        "--debug_route",
+        action="store_true",
+        help="Print per-task TCP routing diagnostics and optionally save per-slide route rows.",
+    )
+    parser.add_argument(
+        "--debug_route_csv",
+        type=str,
+        default="",
+        help="CSV path for per-slide TCP routing diagnostics. Only used with --debug_route.",
+    )
+    parser.add_argument(
+        "--debug_route_topk",
+        type=int,
+        default=3,
+        help="Number of top TCP route scores to save in debug CSV.",
+    )
     args = parser.parse_args()
 
     local_hot_root = ensure_local_hot_storage()
     args.save_dir = str(resolve_hot_path(args.save_dir, local_hot_root))
     args.merge_model_path = str(resolve_hot_path(args.merge_model_path, local_hot_root))
+    if args.debug_route_csv:
+        args.debug_route_csv = str(resolve_hot_path(args.debug_route_csv, local_hot_root))
     print(f"[INFO] Local hot storage root: {local_hot_root}")
     print(f"[INFO] Finetuned checkpoints: {args.save_dir}")
     print(f"[INFO] Merged checkpoints: {args.merge_model_path}")
+    if args.debug_route:
+        print(f"[INFO] TCP route debug enabled; csv={args.debug_route_csv or '<disabled>'}")
 
     cfg    = OmegaConf.load(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -365,6 +465,7 @@ if __name__ == "__main__":
     overall_aucs         = []
     overall_times        = []
     all_acc_per_task     = []
+    route_debug_rows     = []
 
     for fold_id in tqdm(range(cfg.training.num_folds), desc="Folds"):
         fold = f"fold_{fold_id}"
@@ -398,6 +499,11 @@ if __name__ == "__main__":
                 result = eval_task_tcp(
                     test_loader, task_id, model, num_classes,
                     task_prompts, task_model_paths, device,
+                    seq_dataset=seq_dataset,
+                    fold_id=fold_id,
+                    debug_route=args.debug_route,
+                    debug_route_topk=args.debug_route_topk,
+                    debug_rows=route_debug_rows,
                 )
             else:
                 result = eval_task_naive(
@@ -413,11 +519,18 @@ if __name__ == "__main__":
             num_total   += len(test_loader)
             fold_time   += task_time / len(test_loader)
 
+            task_acc = sum(preds_all == targets_all) / len(test_loader)
+            task_bacc = balanced_accuracy_score(targets_all, preds_all)
             acc_per_task[task_id] = results["/acc"]
-            all_baccs.append(balanced_accuracy_score(targets_all, preds_all))
-            all_accs.append(sum(preds_all == targets_all) / len(test_loader))
+            all_baccs.append(task_bacc)
+            all_accs.append(task_acc)
             all_preds_g.append(conv_preds)
             all_targets_g.append(conv_targets)
+
+            print(
+                f"  [Fold {fold_id}] Task {task_id} ({seq_dataset.task_names[task_id]}) "
+                f"ACC={task_acc*100:.4f}% BAcc={task_bacc*100:.4f}%"
+            )
 
             if len(probs_all.shape) == 3:
                 probs_all = probs_all.squeeze(1)
@@ -479,3 +592,13 @@ if __name__ == "__main__":
             accs[t].append(fold_acc[t])
     for t in range(num_tasks):
         print(f"  Task {t}: {np.mean(accs[t])*100:.4f}% ({np.std(accs[t])*100:.4f}%)")
+
+    if args.debug_route and args.debug_route_csv:
+        debug_csv_path = Path(args.debug_route_csv)
+        debug_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        fieldnames = sorted({key for row in route_debug_rows for key in row.keys()})
+        with debug_csv_path.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(route_debug_rows)
+        print(f"\n[INFO] Saved TCP route debug CSV: {debug_csv_path}")

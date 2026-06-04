@@ -102,3 +102,5 @@ tta_losses.py
 tta_adapter.py
 old_scripts_tta
 .nfs*
+docs
+checkpoints_ood
