@@ -5,185 +5,292 @@
   <a href="https://wacv.thecvf.com/"><img src="https://img.shields.io/badge/WACV-2026-blue.svg" alt="WACV2026"></a>
 </p>
 
-> Doanh C. Bui (NAIST)*, Ba Hung Ngo (CNU), Hoai Luan Pham (NAIST), Khang Nguyen (UIT), Maï K. Nguyen (ETIS), Yasuhiko Nakashima (NAIST)
+> Doanh C. Bui (NAIST)*, Ba Hung Ngo (CNU), Hoai Luan Pham (NAIST), Khang Nguyen (UIT), Mai K. Nguyen (ETIS), Yasuhiko Nakashima (NAIST)
 
-<img width="1428" height="580" alt="{285A97E6-9C0D-485C-B01E-DB1C802FDCEE}" src="https://github.com/user-attachments/assets/c16c4012-4789-457f-a3f3-f21482eb7bbd" />
+This branch is a cleaned MergeSlide WSI codebase with repo-local scripts for TITAN finetuning, OPCM merging, CLASS-IL/TASK-IL evaluation, and safer execution on the `/mmlab_students` NFS filesystem.
 
-## 📌 Status Updates
+## 1. Runtime Setup
 
-![update](https://img.shields.io/badge/2026--xx--xx-TODO-blue) Clean the code.
+Install the Python stack from `requirements.txt`. The scripts default to the local environment:
 
-![update](https://img.shields.io/badge/2026--01--27-DONE-green) Update checkpoints for main results (Table 2).
-
-![update](https://img.shields.io/badge/2025--12--29-DONE-green) Released pre-processed TCGA WSI features.
-
-![update](https://img.shields.io/badge/2025--11--15-DONE-green) Release source code.
-
-![update](https://img.shields.io/badge/2025--11--11-DONE-green) Accepted by **WACV2026**.
-
-## 1. Requirements
-
-- transformers=4.56.2
-- torch=2.5.1
-- torchaudio=2.5.1
-- torchvision=0.20.1
-- tqdm=4.67.1
-- transformers=4.56.2
-
-## 1.1. Project Structure
-
+```bash
+/mmlab_students/storageStudents/nguyenvd/anaconda3/envs/mergePre/bin/python3.10
 ```
+
+TITAN is loaded with:
+
+```python
+AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
+```
+
+Make sure the environment has GPU access and permission to load TITAN from Hugging Face before running full training or evaluation.
+
+## 2. Storage Layout
+
+Use NFS only for source code and read-heavy datasets:
+
+```text
+/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA
+/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset
+```
+
+Use local SSD `/docker` for hot writes:
+
+```text
+/docker/data/$USER/MergeSlide_TTA/logs
+/docker/data/$USER/MergeSlide_TTA/checkpoints
+/docker/data/$USER/MergeSlide_TTA/checkpoints_ood
+/docker/data/$USER/MergeSlide_TTA/sqlite
+/docker/data/$USER/MergeSlide_TTA/tmp
+```
+
+The provided scripts create repo symlinks when missing:
+
+```text
+logs -> /docker/data/$USER/MergeSlide_TTA/logs
+checkpoints -> /docker/data/$USER/MergeSlide_TTA/checkpoints
+checkpoints_ood -> /docker/data/$USER/MergeSlide_TTA/checkpoints_ood
+```
+
+You can choose a dedicated log directory per run:
+
+```bash
+LOG_DIR=/docker/data/$USER/MergeSlide_TTA/logs/my_run bash scripts/test_classIL.sh
+```
+
+## 3. Project Structure
+
+```text
 MergeSlide_TTA/
-├── README.md
-├── task_prompts.pt
-├── train_random_sampling.py
-├── opcm_mergeslide.py
+├── train.py
+├── merge.py
 ├── test_classIL_task_prompt.py
 ├── test_classIL_task_prompt_other_metrics.py
 ├── test_taskIL.py
-├── mergeslide_tta/
-│   ├── __init__.py
-│   ├── datasets.py
-│   ├── prompts_zeroshot.py
-│   └── utils.py
-└── notebooks/
-    └── WSI_processing.ipynb
+├── task_prompts.pt
+├── configs/
+├── scripts/
+├── tools/
+│   └── run_classil_with_pt_features.py
+└── mergeslide_tta/
+    ├── constants.py
+    ├── datasets.py
+    ├── prompts_zeroshot.py
+    ├── utils.py
+    └── checkpoint_mirror.py
 ```
 
-- Root-level scripts remain the CLI entrypoints.
-- Shared modules now live under `mergeslide_tta/`.
-- `task_prompts.pt` stays at the project root because it is an evaluation artifact.
+Important entrypoints:
 
-## 2. Datasets
+- `train.py`: per-task TITAN finetuning. Saves `fold_{k}/task_{t}.pt`.
+- `merge.py`: OPCM sequential model merging. Saves intermediate and final merged checkpoints.
+- `test_classIL_task_prompt.py`: CLASS-IL final-task evaluation with `tcp` or `naive` mode.
+- `test_classIL_task_prompt_other_metrics.py`: CLASS-IL continual metrics, including forgetting/BWT/FWT-style evaluation.
+- `test_taskIL.py`: TASK-IL evaluation where the test task is known.
+- `tools/run_classil_with_pt_features.py`: wrapper used by scripts to prefer `.pt` feature tensors, avoid problematic H5 feature reads when possible, force stable per-class metric shapes, and keep DataLoader multiprocessing disabled through `*_num_workers0.yaml` configs.
 
-### 2.1. Access Datasets
+## 4. Dataset Configs
 
-We use a stream of six datasets TCGA-BRCA, TCGA-NSCLC, TCGA-RCC, TCGA-ESCA, TCGA-TGCT and TCGA-CESC in this study.
+The current configs point to:
 
-For dataset preparation, you may need to download the WSIs from the TCGA portal and process them (patch extraction + feature extraction using TITAN’s vision encoder). If you are not familiar with this procedure, please refer to `notebooks/WSI_processing.ipynb`.
-
-For convenience, we also provide pre-processed features that can be used directly with the scripts below.
-
-- Data annotation and WSI features: Updating.
-
-### 2.2. Data Preparation
-
-For dataset preparation, ESCA, TGCT, and CESC have a slightly different format compared with BRCA, NSCLC, and RCC. Therefore, two separate Python classes are defined for these groups. However, for both training and inference, we only need to prepare the data paths in `mergeslide_tta/datasets.py` as follows (in `Sequential_Generic_MIL_Dataset` class):
-
-```[python3]
-datasets = [Generic_MIL_Dataset(csv_path='/path/to/dataset/wsi_dataset_annotation/tcga_brca/tcga_brca_subset.csv.zip', data_dir='/path/to/dataset/TCGA-BRCA_processed/features/', shuffle=False, seed=0, print_info=True, label_dict={'IDC': 0, 'ILC': 1}, patient_strat=False, ignore=['MDLC', 'PD', 'ACBC', 'IMMC', 'BRCNOS', 'BRCA', 'SPC', 'MBC', 'MPT']), 
-                Generic_MIL_Dataset(csv_path='/path/to/dataset/wsi_dataset_annotation/tcga_rcc/tcga_kidney_subset.csv.zip', data_dir='/path/to/dataset/TCGA-RCC_processed/features/', shuffle=False, seed=0, print_info=True, label_dict={'CCRCC': 0, 'PRCC': 1, 'CHRCC': 2}, patient_strat=False, ignore=[]), 
-                Generic_MIL_Dataset(csv_path='/path/to/dataset/wsi_dataset_annotation/tcga_nsclc/tcga_lung_subset.csv.zip', data_dir='/path/to/dataset/TCGA-NSCLC_processed/features/', shuffle=False, seed=0, print_info=True, label_dict={'LUAD': 0, 'LUSC': 1}, patient_strat=False, ignore=[]), 
-                Generic_MIL_Dataset2(data_dir='/path/to/dataset/TCGA-ESCA_processed/features/', label_dict={0: 0, 1: 1}), 
-                Generic_MIL_Dataset2(data_dir='/path/to/dataset/TCGA-TGCT_processed/features/', label_dict={0: 0, 1: 1}), 
-                Generic_MIL_Dataset2(data_dir='/path/to/dataset/TCGA-CESC_processed/features/', label_dict={0: 0, 1: 1})]
-    
-split_dirs = ['/path/to/dataset/wsi_dataset_annotation/tcga_brca',
-                '/path/to/dataset/wsi_dataset_annotation/tcga_rcc', 
-                '/path/to/dataset/wsi_dataset_annotation/tcga_nsclc', 
-                '/path/to/dataset/wsi_dataset_annotation/tcga_esca', 
-                '/path/to/dataset/wsi_dataset_annotation/tcga_tgct', 
-                '/path/to/dataset/wsi_dataset_annotation/tcga_cesc']
+```text
+/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset
 ```
 
-In this setup, `/path/to/dataset` refers to the root directory of the dataset. The `wsi_dataset_annotation` file and all feature directories under `/TCGA-*_processed/features` are provided in **Section 2.1: Access Datasets**.
+IND annotations:
 
-## 3. Implementation
-
-As described in the paper, we first define class-aware prompts to describe a set of class labels (**Class-aware Prompt Design**), get their embeddings using TITAN's text encoder, and train each model on its corresponding TCGA task using the pre-trained weights of TITAN’s slide aggregator (**Per-task finetuning**). We then merge these models using a continual model-merging method (**Model merging**).
-
-**Note:** You may need to be granted to access TITAN pre-trained slide aggregator by yourself. Please visit https://huggingface.co/MahmoodLab/TITAN.
-
-### 3.1. Class-aware Prompt Design
-
-For the six tasks in this study, please refer to `mergeslide_tta/prompts_zeroshot.py`. You may design class-aware prompts for your new task by following the templates provided in that file.
-
-### 3.2. Per-task Finetuning
-
-Run the below python script to perform per-task finetuning:
-
-```
-python train_random_sampling.py --save_dir /path/to/finetuned/checkpoints
+```text
+wsi_dataset_annotation/
 ```
 
-where `/path/to/finetuned/checkpoints` is the directory where you want the model checkpoints to be stored.
+OOD/cross-site annotations:
 
-### 3.3. Model Merging
-
-Run the following Python script to perform model merging:
-
-```
-python opcm_mergeslide.py --num_tasks 6 
---src_finedtuned_checkpoints /path/to/finetuned/checkpoints 
---des_merged_checkpoints /path/to/merged/checkpoints/
+```text
+wsi_dataset_annotation_cross_sites/
 ```
 
-Merged checkpoints are stored in `/path/to/merged/checkpoints/` (All tasks only use one checkpoint for later inference).
+Main config files:
 
-Note: Because we perform 10-fold cross-validation, the script generates 10 folders named `/path/to/merged/checkpoints/_fold_*`. Each folder contains `num_tasks=6` merged checkpoints (6 tasks in this study), representing the accumulated model state after each task. These intermediate checkpoints are used only for evaluating continual learning metrics such as forgetting, BWT, and FWT.
+- `configs/default.yaml`: IND forward order, training-style `num_workers`.
+- `configs/default_eval_num_workers0.yaml`: IND forward order, evaluation-safe `num_workers: 0`.
+- `configs/default_reverse.yaml`: IND reverse order.
+- `configs/default_reverse_eval_num_workers0.yaml`: IND reverse order, evaluation-safe `num_workers: 0`.
+- `configs/default_ood.yaml`: OOD forward order.
+- `configs/default_ood_eval_num_workers0.yaml`: OOD forward order, evaluation-safe `num_workers: 0`.
 
-```
-[/path/to/merged/checkpoints/]_fold_0
-|___merged_weight_opcm_random_sampling_fold_0_task_0.pth
-|___merged_weight_opcm_random_sampling_fold_0_task_1.pth
-|___merged_weight_opcm_random_sampling_fold_0_task_2.pth
-|___...
-|___merged_weight_opcm_random_sampling_fold_0_task_6.pth
-```
+Task stream:
 
-If you do not need to compute forgetting, BWT, or FWT, only the final checkpoint`merged_weight_opcm_random_sampling_fold_0_task_6.pth`
-is required for inference on all `num_tasks=6` tasks in this study.
-
-### 3.3. Evaluation
-
-The evaluation is designed for CLASS-IL and TASK-IL scenario.
-
-For CLASS-IL, if we only need Accuracy, Balanced Accuracy, Macro/Weighted F1, Precicion, Recall for all tasks after training the last task, just run:
-
-```
-python test_classIL_task_prompt.py --save_dir /path/to/finetuned_checkpoints 
---merge_model_path /path/to/merged/checkpoints/
+```text
+BRCA -> RCC -> NSCLC -> ESCA -> TGCT -> CESC
 ```
 
-If we need Forgetting, BWT, FWT:
+Reverse configs invert this order internally.
 
-```
-python test_classIL_task_prompt_other_metrics.py --save_dir /path/to/finetuned_checkpoints 
---merge_model_path /path/to/merged/checkpoints/
-```
+## 5. Scripts
 
-For TASK-IL scenario, just run:
+Run scripts from the repo root.
 
-```
-python test_taskIL.py --save_dir /path/to/finetuned_checkpoints 
---merge_model_path /path/to/merged/checkpoints/
+### Finetuning
+
+```bash
+bash scripts/finetune.sh
 ```
 
-**Note 1:** we load `/path/to/finetuned_checkpoints` only to extract the class-aware prompts from the per-task finetuned checkpoints (these checkpoints remain completely frozen during training; that is, the class-aware prompt embeddings do not change from TITAN to the per-task finetuning stage). We do this purely for convenience. A more efficient implementation could be added later, where only the class-aware prompts are provided directly, eliminating the need to load the per-task finetuned checkpoints and avoiding potential confusion.
+Defaults:
 
-**Note 2:** For the main results, we report balanced accuracy. However, for metrics such as FGT, BWT, and Forgetting, we use standard accuracy for their calculation.
+- entrypoint: `train.py`
+- config: `configs/default_ood_eval_num_workers0.yaml`
+- save dir: `/docker/data/$USER/MergeSlide_TTA/checkpoints_ood/finetuned`
+- logs: `$LOG_DIR/result_train.log`, `$LOG_DIR/error_train.log`
 
-To reproduce Table 2 in the MergeSlide manuscript, please use the checkpoints provided [here](https://drive.google.com/drive/folders/1Bf0-A0M8Si56GQjJR9HeJhef2YVkm3KK?usp=sharing). For other tables, please contact me at caodoanh2001 at gmail dot com.
+Common overrides:
 
-## 4. Acknowledgement
-
-To complete this study, we were inspired by the following code bases:
-
-- [TITAN](https://github.com/mahmoodlab/TITAN)
-- [FusionBench](https://github.com/tanganke/fusion_bench)
-- [CATE](https://github.com/HKU-MedAI/CATE)
-
-Once again, we sincerely thank the authors of these projects for their tremendous effort and contributions, which allowed us to stand on the shoulders of giants.
-
-## 5. Citation
-If you find this work useful in your research, please consider citing:
+```bash
+CONFIG=configs/default_eval_num_workers0.yaml \
+SAVE_DIR=/docker/data/$USER/MergeSlide_TTA/checkpoints/finetuned \
+FOLD_START=0 FOLD_END=10 \
+bash scripts/finetune.sh
 ```
 
+### Merging
+
+```bash
+bash scripts/mergemodel.sh
+```
+
+Defaults:
+
+- entrypoint: `merge.py`
+- config: `configs/default_ood_eval_num_workers0.yaml`
+- finetuned dir: `/docker/data/$USER/MergeSlide_TTA/checkpoints_ood/finetuned`
+- merged dir: `/docker/data/$USER/MergeSlide_TTA/checkpoints_ood/merged`
+- logs: `$LOG_DIR/result_merge_ood.log`, `$LOG_DIR/error_merge_ood.log`
+
+Common overrides:
+
+```bash
+CONFIG=configs/default_eval_num_workers0.yaml \
+FINETUNED_DIR=/docker/data/$USER/MergeSlide_TTA/checkpoints/finetuned \
+MERGED_DIR=/docker/data/$USER/MergeSlide_TTA/checkpoints/merged \
+bash scripts/mergemodel.sh
+```
+
+### CLASS-IL Final Evaluation
+
+```bash
+LOG_DIR=/docker/data/$USER/MergeSlide_TTA/logs/classil_eval bash scripts/test_classIL.sh
+```
+
+Current script runs the enabled CLASS-IL commands in `scripts/test_classIL.sh`. It uses `tools/run_classil_with_pt_features.py`, writes logs into `$LOG_DIR`, and keeps hot writes on `/docker`.
+
+If TCP runs are commented out in the script for a specific experiment, uncomment the corresponding `run_to_logs` block before launching.
+
+### CLASS-IL Other Metrics
+
+```bash
+LOG_DIR=/docker/data/$USER/MergeSlide_TTA/logs/classil_other_metrics bash scripts/test_classIL_other_metrics.sh
+```
+
+This script wraps `test_classIL_task_prompt_other_metrics.py` through the PT-first wrapper and logs to `$LOG_DIR`.
+
+### TASK-IL Evaluation
+
+```bash
+LOG_DIR=/docker/data/$USER/MergeSlide_TTA/logs/taskil_eval bash scripts/test_taskIL.sh
+```
+
+The current script defaults to OOD config/checkpoints:
+
+```text
+configs/default_ood_eval_num_workers0.yaml
+./checkpoints_ood/finetuned
+./checkpoints_ood/merged
+```
+
+Override these variables if you want IND checkpoints:
+
+```bash
+CONFIG_FORWARD=configs/default_eval_num_workers0.yaml \
+bash scripts/test_taskIL.sh
+```
+
+### Diagnostic CLASS-IL TCP Scripts
+
+Two diagnostic scripts may exist locally:
+
+```bash
+bash scripts/test_classIL_tcp_num_workers0.sh
+bash scripts/test_classIL_tcp_pt_features_num_workers0.sh
+```
+
+Use the PT-first version when H5 feature reads on NFS hang. Both are lightweight launch wrappers, not separate methods.
+
+## 6. Direct Python Commands
+
+The scripts are preferred because they set log paths, local hot-write paths, HDF5 locking behavior, and `num_workers: 0` configs. If you run Python directly, use the wrapper for eval:
+
+```bash
+python -u tools/run_classil_with_pt_features.py \
+  --config configs/default_eval_num_workers0.yaml \
+  --save_dir ./checkpoints/finetuned \
+  --merge_model_path ./checkpoints/merged \
+  --mode tcp
+```
+
+Direct entrypoints are still valid when you explicitly want the raw behavior:
+
+```bash
+python train.py --config configs/default.yaml --save_dir ./checkpoints/finetuned
+python merge.py --config configs/default.yaml --finetuned_checkpoints ./checkpoints/finetuned --merged_checkpoints ./checkpoints/merged
+python test_taskIL.py --config configs/default_eval_num_workers0.yaml --save_dir ./checkpoints/finetuned --merge_model_path ./checkpoints/merged
+```
+
+## 7. Route Debugging
+
+`test_classIL_task_prompt.py` supports TCP routing diagnostics:
+
+```bash
+python -u tools/run_classil_with_pt_features.py \
+  --config configs/default_eval_num_workers0.yaml \
+  --save_dir ./checkpoints/finetuned \
+  --merge_model_path ./checkpoints/merged \
+  --mode tcp \
+  --debug_route \
+  --debug_route_csv logs/debug_route_tcp.csv
+```
+
+The CSV records per-slide routing scores and top-k task predictions. It is useful for inspecting task-prompt routing failures such as CESC being routed to ESCA.
+
+## 8. Validation
+
+Use lightweight checks after code edits:
+
+```bash
+python -m py_compile train.py merge.py test_classIL_task_prompt.py test_classIL_task_prompt_other_metrics.py test_taskIL.py tools/run_classil_with_pt_features.py
+python -m compileall -q mergeslide_tta
+bash -n scripts/finetune.sh scripts/mergemodel.sh scripts/test_classIL.sh scripts/test_classIL_other_metrics.sh scripts/test_taskIL.sh
+```
+
+Do not run full training, merging, or evaluation without confirming GPU, TITAN/Hugging Face access, dataset paths, fold range, and checkpoint paths.
+
+## 9. Citation
+
+If you find this work useful in your research, please cite:
+
+```bibtex
 @inproceedings{
     bui2026merge,
     title={MergeSlide: Continual Model Merging and Task-to-Class Prompt-Aligned Inference for Lifelong Learning on Whole Slide Images},
-    author={Doanh C. Bui, Ba Hung Ngo, Hoai Luan Pham, Khang Nguyen, Maï K. Nguyen, Yasuhiko Nakashima},
+    author={Doanh C. Bui, Ba Hung Ngo, Hoai Luan Pham, Khang Nguyen, Mai K. Nguyen, Yasuhiko Nakashima},
     booktitle={The IEEE/CVF Winter Conference on Applications of Computer Vision},
     year={2026},
 }
 ```
+
+## 10. Acknowledgement
+
+This project builds on ideas and code from:
+
+- [TITAN](https://github.com/mahmoodlab/TITAN)
+- [FusionBench](https://github.com/tanganke/fusion_bench)
+- [CATE](https://github.com/HKU-MedAI/CATE)
