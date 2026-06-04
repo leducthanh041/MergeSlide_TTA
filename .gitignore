@@ -1,4 +1,6 @@
-# Python bytecode and caches
+# ---------------------------------------------------------------------------
+# Python caches
+# ---------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
@@ -6,98 +8,111 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# Jupyter
-.ipynb_checkpoints/
-
-# Virtual environments
+# ---------------------------------------------------------------------------
+# Virtual environments and local tool state
+# ---------------------------------------------------------------------------
 .venv/
 venv/
 env/
 ENV/
+.codex/
+.agents/
+AGENTS.md
 
-# Editor and OS files
+# ---------------------------------------------------------------------------
+# Editor, OS, and notebook noise
+# ---------------------------------------------------------------------------
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+.ipynb_checkpoints/
+notebooks/__pycache__/
+notebooks/.ipynb_checkpoints/
 
-# Local experiment and training outputs
-/logs/
+# ---------------------------------------------------------------------------
+# Hot-write outputs. In this repo these are normally symlinks to /docker.
+# ---------------------------------------------------------------------------
+/logs
 /logs*/
+/checkpoints
+/checkpoints_ood
+/checkpoints_test/
+/results/
 /runs/
 /outputs/
-/results/
-/checkpoints/
 /wandb/
 
-# Generated model artifacts from training / merging
+# ---------------------------------------------------------------------------
+# Model artifacts and experiment outputs
+# ---------------------------------------------------------------------------
 ckpts_outputs_finetuning_task_*.pt
 merged_weight_opcm_random_sampling_*.pth
+*.ckpt
+*.pth
+*.pt
+!task_prompts.pt
 
-# Local archives and temporary files
+# ---------------------------------------------------------------------------
+# Temporary files, archives, and NFS leftovers
+# ---------------------------------------------------------------------------
 *.tmp
 *.temp
 *.bak
+*.bak_*
+*.orig
+*.swp
 *.zip
 *.tar
 *.tar.gz
 *.tgz
+.nfs*
+configs/.nfs*
 
-# Notebook-generated local artifacts
-/notebooks/__pycache__/
-/notebooks/*.bak*
-/notebooks/*.tmp
-/notebooks/*.temp
-/notebooks/*.zip
-/notebooks/*.tar
-/notebooks/*.tar.gz
-/notebooks/*.tgz
-/notebooks/*_manifest.csv
-/notebooks/*_skipped*.csv
-/notebooks/*_cleanup_*.csv
-/notebooks/slurm-*.out
+# ---------------------------------------------------------------------------
+# Notebook/generated helper artifacts
+# ---------------------------------------------------------------------------
+notebooks/*.bak*
+notebooks/*.tmp
+notebooks/*.temp
+notebooks/*.zip
+notebooks/*.tar
+notebooks/*.tar.gz
+notebooks/*.tgz
+notebooks/*_manifest.csv
+notebooks/*_skipped*.csv
+notebooks/*_cleanup_*.csv
+notebooks/slurm-*.out
 
-ASlide
-PrePATH
-log
-.codex
-TRIDENT
+# ---------------------------------------------------------------------------
+# Local legacy or external workspaces kept out of the clean codebase
+# ---------------------------------------------------------------------------
+ASlide/
+PrePATH/
+TRIDENT/
+log/
+old_code_tta/
+old_scripts_tta/
+old_code_mergeslide/
+related_work/
+checkpoints_nfs_backup_*/
+docs_old/
 
+# ---------------------------------------------------------------------------
+# One-off local maintenance scripts
+# ---------------------------------------------------------------------------
 cleanup_rcc_corrupt_trident_outputs.py
 clear_folder.py
 convert_trident_h5_to_pt.py
 create_trident_mpp_csv.py
 flatten_wsi_dataset.py
+zip_tcga_datasets.py
+tune_tta_grid_search.py
+tune_tta_grid_search.sh
 
+# ---------------------------------------------------------------------------
+# Invalid or backup shell files
+# ---------------------------------------------------------------------------
+*.sh.bak*
 BRCA.sh.bak_invalid_utf8
 CESC.sh.bak_pre_mpp_filter
-zip_tcga_datasets.py
-
-.nfs000000001101f790000003c6
-configs/.nfs00000000153fec1c00000397
-.agents/
-AGENTS.md
-checkpoints_test/
-checkpoints_ood/
-datasets_py_explanation_vi.md
-.nfs00000000122e0790000005a1
-.nfs00000000153d22a8000003d0
-configs/.nfs0000000011033594000003cf
-configs/.nfs00000000153fed51000003ce
-
-configs/default_eval_num_workers0.yaml
-scripts/test_classIL_tcp_num_workers0.sh
-scripts/test_classIL_tcp_pt_features_num_workers0.sh
-scripts
-checkpoints
-checkpoints_nfs_backup_20260515_155917/
-logs
-related_work
-
-tune_tta_grid_search.sh
-tune_tta_grid_search.py
-
-old_code_tta
-tta_losses.py
-tta_adapter.py
-old_scripts_tta

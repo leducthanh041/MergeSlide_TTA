@@ -24,6 +24,9 @@ CONFIG_FORWARD="${CONFIG_FORWARD:-configs/default_ood_eval_num_workers0.yaml}"
 CONFIG_REVERSE="${CONFIG_REVERSE:-configs/default_reverse_eval_num_workers0.yaml}"
 PT_FEATURE_WRAPPER="${PT_FEATURE_WRAPPER:-tools/run_classil_with_pt_features.py}"
 TASKIL_ENTRYPOINT="${TASKIL_ENTRYPOINT:-test_taskIL.py}"
+TASKIL_DEBUG="${TASKIL_DEBUG:-1}"
+TASKIL_DEBUG_TASKS="${TASKIL_DEBUG_TASKS:-5}"
+TASKIL_DEBUG_CSV="${TASKIL_DEBUG_CSV:-$MERGESLIDE_LOCAL_ROOT/debug_taskil_cesc_ood.csv}"
 
 if [ -z "${PYTHON_BIN:-}" ]; then
     DEFAULT_PYTHON="/mmlab_students/storageStudents/nguyenvd/anaconda3/envs/mergePre/bin/python3.10"
@@ -67,6 +70,21 @@ echo "[INFO] config_forward=$CONFIG_FORWARD"
 echo "[INFO] config_reverse=$CONFIG_REVERSE"
 echo "[INFO] pt_feature_wrapper=$PT_FEATURE_WRAPPER"
 echo "[INFO] taskil_entrypoint=$TASKIL_ENTRYPOINT"
+echo "[INFO] taskil_debug=$TASKIL_DEBUG"
+echo "[INFO] taskil_debug_tasks=$TASKIL_DEBUG_TASKS"
+echo "[INFO] taskil_debug_csv=$TASKIL_DEBUG_CSV"
+
+TASKIL_DEBUG_ARGS=()
+if [ "$TASKIL_DEBUG" = "1" ]; then
+    TASKIL_DEBUG_ARGS+=(--debug)
+    if [ -n "$TASKIL_DEBUG_TASKS" ]; then
+        TASKIL_DEBUG_ARGS+=(--debug_tasks "$TASKIL_DEBUG_TASKS")
+    fi
+    if [ -n "$TASKIL_DEBUG_CSV" ]; then
+        mkdir -p "$(dirname "$TASKIL_DEBUG_CSV")"
+        TASKIL_DEBUG_ARGS+=(--debug_csv "$TASKIL_DEBUG_CSV")
+    fi
+fi
 
 check_log_not_held() {
     local log_path="$1"
@@ -125,7 +143,8 @@ run_to_logs "$LOG_DIR/result_test_taskIL.log" "$LOG_DIR/error_test_taskIL.log" \
         --entrypoint "$TASKIL_ENTRYPOINT" \
         --config "$CONFIG_FORWARD" \
         --save_dir ./checkpoints_ood/finetuned \
-        --merge_model_path ./checkpoints_ood/merged
+        --merge_model_path ./checkpoints_ood/merged \
+        "${TASKIL_DEBUG_ARGS[@]}"
 
 #run_to_logs "$LOG_DIR/result_test_taskIL_re.log" "$LOG_DIR/error_test_taskIL_re.log" \
 #    "$PYTHON_BIN" -u "$PT_FEATURE_WRAPPER" \

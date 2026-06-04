@@ -24,9 +24,11 @@ from sklearn.metrics import balanced_accuracy_score
 from tqdm import tqdm
 from transformers import AutoModel
 
+import csv
+
 from mergeslide_tta.constants import (
     EMBED_DIM, K_PATCHES, NUM_TASKS,
-    TITAN_PS_ARG,
+    TASK_NAMES, TITAN_PS_ARG,
 )
 from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
 from mergeslide_tta.metrics import pad_numpy_arrays
@@ -92,16 +94,27 @@ def eval_task(
     task_id: int,
     device: str,
     num_classes: list,
+    task_prompts: torch.Tensor = None,   # [T, 768] — dùng để tính embedding sim
+    debug: bool = False,
+    fold_id: int = 0,
 ) -> tuple:
     """
-    Task-IL inference: gọi thẳng model với MLP head đúng task đã gắn sẵn.
-    Không có task routing — ground-truth task_id đã biết.
+    Task-IL inference với debug tuỳ chọn.
+
+    Khi debug=True và task_prompts được cung cấp, mỗi slide sẽ được log thêm:
+      - slide embedding norm
+      - cosine similarity với tất cả T task prompts (→ xem CESC bị kéo về đâu)
+      - top-1 task sim (predicted task nếu dùng TCP)
+      - per-class confidence (softmax prob của từng class trong task)
     """
     preds_all   = []
     probs_all   = []
     targets_all = []
+    debug_rows  = []   # chỉ fill khi debug=True
 
-    ps = torch.tensor(TITAN_PS_ARG).int().to(device)
+    ps         = torch.tensor(TITAN_PS_ARG).int().to(device)
+    T          = task_prompts.shape[0] if task_prompts is not None else 0
+    task_names = TASK_NAMES
 
     with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
         for features, coords, label in tqdm(test_loader, leave=False):
@@ -111,28 +124,70 @@ def eval_task(
             features, coords = features[idx], coords[idx]
 
             try:
-                logits = model(features, coords, ps).float()
+                # backbone forward — trả về [1, 768] embedding
+                embed  = model.backbone(features, coords, ps).float()
+                logits = model.mlp(embed).float()
             except RuntimeError:
-                # Fallback CPU nếu OOM — giữ đúng theo code gốc
                 model.cpu()
-                logits = model(
+                embed  = model.backbone(
                     features.cpu(), coords.cpu(),
                     torch.tensor(TITAN_PS_ARG).int().cpu()
                 ).float()
+                logits = model.mlp(embed).float()
                 model.to(device)
+                embed = embed.to(device)
 
             pred = int(logits.argmax(1))
 
             if num_classes[task_id] == 2:
-                probs      = nn.functional.softmax(logits, dim=1)[:, 1]
+                probs      = nn.functional.softmax(logits.float(), dim=1)[:, 1]
                 roc_kwargs = {}
             else:
-                probs      = nn.functional.softmax(logits, dim=1)
+                probs      = nn.functional.softmax(logits.float(), dim=1)
                 roc_kwargs = {"multi_class": "ovo", "average": "macro"}
 
             preds_all.append(np.array([pred]))
             probs_all.append(probs.cpu().numpy())
             targets_all.append(label.numpy())
+
+            # --- debug logging ---
+            if debug and task_prompts is not None:
+                embed_f32 = embed.float()  # [1, 768]
+
+                # Cosine sim với từng task prompt
+                tp_f32    = task_prompts.float()                     # [T, 768]
+                embed_n   = nn.functional.normalize(embed_f32, dim=1)
+                tp_n      = nn.functional.normalize(tp_f32, dim=1)
+                task_sims = (embed_n @ tp_n.T).float().squeeze(0).cpu().numpy()  # [T]
+
+                tcp_pred_task = int(task_sims.argmax())
+
+                # Softmax class probs tất cả classes (nếu binary thì 2 giá trị)
+                class_probs_full = nn.functional.softmax(logits.float(), dim=1).float().squeeze(0).cpu().numpy()
+
+                row = {
+                    "fold":          fold_id,
+                    "task":          task_id,
+                    "task_name":     task_names[task_id] if task_id < len(task_names) else str(task_id),
+                    "true_label":    int(label),
+                    "pred_label":    pred,
+                    "correct":       int(pred == int(label)),
+                    "embed_norm":    float(embed_f32.norm().item()),
+                    "tcp_pred_task": tcp_pred_task,
+                    "tcp_correct":   int(tcp_pred_task == task_id),
+                    "max_task_sim":  float(task_sims.max()),
+                    "true_task_sim": float(task_sims[task_id]),
+                    "sim_margin":    float(task_sims[task_id] - task_sims.max())
+                                     if tcp_pred_task != task_id else 0.0,
+                }
+                # Task sim per task (để biết distribution đầy đủ)
+                for t in range(T):
+                    row[f"task_sim_{t}_{task_names[t] if t < len(task_names) else t}"] = float(task_sims[t])
+                # Class probs
+                for c, cp in enumerate(class_probs_full):
+                    row[f"class_prob_{c}"] = float(cp)
+
+                debug_rows.append(row)
 
     preds_arr   = np.concatenate(preds_all)
     targets_arr = np.concatenate(targets_all)
@@ -145,7 +200,7 @@ def eval_task(
         targets_arr, preds_arr, probs_arr,
         roc_kwargs=roc_kwargs, prefix="",
     )
-    return metrics, preds_arr, targets_arr
+    return metrics, preds_arr, targets_arr, debug_rows
 
 
 if __name__ == "__main__":
@@ -156,23 +211,45 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir",         type=str, required=True,
                         help="Root dir chứa finetuned checkpoints")
     parser.add_argument("--merge_model_path", type=str, required=True,
-                        help="Prefix thư mục merged: {prefix}_fold_{id}/merged_final.pth")
+                        help="Prefix thư mục merged: {prefix}/fold_{id}/merged_final.pth")
+    # --- debug flags ---
+    parser.add_argument("--debug",            action="store_true",
+                        help="Log per-slide embedding sim, TCP routing, class probs")
+    parser.add_argument("--debug_csv",        type=str, default="",
+                        help="Path lưu CSV debug. Yêu cầu --debug.")
+    parser.add_argument("--debug_tasks",      type=str, default="",
+                        help="Chỉ debug các task cụ thể, vd: '3,4,5'. Mặc định debug tất cả.")
     args = parser.parse_args()
 
-    local_hot_root = ensure_local_hot_storage()
-    args.save_dir = str(resolve_hot_path(args.save_dir, local_hot_root))
+    local_hot_root        = ensure_local_hot_storage()
+    args.save_dir         = str(resolve_hot_path(args.save_dir,         local_hot_root))
     args.merge_model_path = str(resolve_hot_path(args.merge_model_path, local_hot_root))
-    print(f"[INFO] Local hot storage root: {local_hot_root}")
-    print(f"[INFO] Finetuned checkpoints: {args.save_dir}")
-    print(f"[INFO] Merged checkpoints: {args.merge_model_path}")
 
     cfg    = OmegaConf.load(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     seed_torch(device, cfg.training.seed)
 
-    num_tasks    = cfg.training.num_tasks
-    seq_dataset  = Sequential_Generic_MIL_Dataset(cfg)
-    num_classes  = seq_dataset.num_classes
+    num_tasks   = cfg.training.num_tasks
+    seq_dataset = Sequential_Generic_MIL_Dataset(cfg)
+    num_classes = seq_dataset.num_classes
+
+    # Task prompts — dùng để tính embedding similarity trong debug
+    task_prompts = None
+    if args.debug:
+        tp_path = PROJECT_ROOT / "task_prompts.pt"
+        if tp_path.exists():
+            task_prompts = torch.load(str(tp_path), map_location="cpu").to(device)
+            if getattr(cfg.dataset, "order", "forward") == "reverse":
+                task_prompts = task_prompts.flip(0)
+            print(f"[DEBUG] task_prompts loaded: {task_prompts.shape}")
+        else:
+            print(f"[WARN] task_prompts.pt not found at {tp_path} — sim columns will be skipped")
+
+    # Parse debug_tasks filter
+    debug_task_set = None
+    if args.debug_tasks:
+        debug_task_set = set(int(t) for t in args.debug_tasks.split(","))
+        print(f"[DEBUG] Debugging tasks: {sorted(debug_task_set)}")
 
     print("Loading TITAN base model ...")
     base_model = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
@@ -181,25 +258,22 @@ if __name__ == "__main__":
     overall_accs     = []
     overall_baccs    = []
     all_acc_per_task = []
+    all_debug_rows   = []   # acumulados
 
     for fold_id in tqdm(range(cfg.training.num_folds), desc="Folds"):
         fold = f"fold_{fold_id}"
 
-        # Merged checkpoint — prefix + fold name, đúng theo pattern code gốc
-        merge_model_path = Path(args.merge_model_path) / fold / "merged_final.pth"
-        print(f"Loading: {merge_model_path}")
+        merge_path = Path(args.merge_model_path) / fold / "merged_final.pth"
+        print(f"\nLoading: {merge_path}")
         base_model.vision_encoder.load_state_dict(
-            torch.load(str(merge_model_path), map_location="cpu")
+            torch.load(str(merge_path), map_location="cpu")
         )
 
         all_baccs    = []
         all_accs     = []
         acc_per_task = {}
-        num_correct  = 0.0
-        num_total    = 0.0
 
         for task_id in range(num_tasks):
-            # Gắn đúng MLP head của task này vào backbone
             task_ckpt = Path(args.save_dir) / fold / f"task_{task_id}.pt"
             state     = torch.load(str(task_ckpt), map_location="cpu")
             mlp_state = {
@@ -215,12 +289,23 @@ if __name__ == "__main__":
             model.eval()
 
             _, _, test_loader = seq_dataset.get_data_loaders(fold_id, task_id)
-            results, preds_all, targets_all = eval_task(
-                test_loader, model, task_id, device, num_classes
+
+            do_debug = args.debug and (
+                debug_task_set is None or task_id in debug_task_set
             )
 
-            num_correct += sum(preds_all == targets_all)
-            num_total   += len(test_loader)
+            results, preds_all, targets_all, debug_rows = eval_task(
+                test_loader,
+                model,
+                task_id,
+                device,
+                num_classes,
+                task_prompts = task_prompts if do_debug else None,
+                debug        = do_debug,
+                fold_id      = fold_id,
+            )
+
+            all_debug_rows.extend(debug_rows)
 
             bacc = balanced_accuracy_score(targets_all, preds_all)
             acc  = sum(preds_all == targets_all) / len(test_loader)
@@ -229,14 +314,30 @@ if __name__ == "__main__":
             all_baccs.append(bacc)
             all_accs.append(acc)
 
-            print(f"  Fold {fold_id} | {seq_dataset.task_names[task_id]}: "
-                  f"BAcc={bacc*100:.4f}% Acc={acc*100:.4f}%")
+            # Per-class accuracy
+            n_cls = num_classes[task_id]
+            per_class_acc = []
+            for c in range(n_cls):
+                mask = targets_all == c
+                per_class_acc.append(
+                    f"cls{c}={sum(preds_all[mask]==c)/max(mask.sum(),1)*100:.1f}%"
+                )
+
+            # TCP sim summary (từ debug_rows nếu có)
+            tcp_info = ""
+            if debug_rows and task_prompts is not None:
+                tcp_correct = sum(r["tcp_correct"] for r in debug_rows if r["task"]==task_id)
+                tcp_total   = sum(1 for r in debug_rows if r["task"]==task_id)
+                tcp_info    = f" | TCP={tcp_correct}/{tcp_total}({100*tcp_correct/max(tcp_total,1):.0f}%)"
+
+            print(f"  Fold {fold_id} | {seq_dataset.task_names[task_id]:6s}: "
+                  f"BAcc={bacc*100:.2f}%  Acc={acc*100:.2f}%  "
+                  f"[{' | '.join(per_class_acc)}]{tcp_info}")
 
         overall_baccs.append(np.mean(all_baccs))
         overall_accs.append(np.mean(all_accs))
         all_acc_per_task.append(acc_per_task)
-
-        print(f"[Fold {fold_id}] BAcc={np.mean(all_baccs):.4f} "
+        print(f"[Fold {fold_id}] BAcc={np.mean(all_baccs)*100:.4f}%  "
               f"Acc={np.mean(all_accs)*100:.4f}%")
 
     print("\n===== Task-IL Results =====")
@@ -249,4 +350,42 @@ if __name__ == "__main__":
         for t in range(num_tasks):
             accs[t].append(fold_acc[t])
     for t in range(num_tasks):
-        print(f"  {seq_dataset.task_names[t]}: {np.mean(accs[t])*100:.4f}% ({np.std(accs[t])*100:.4f}%)")
+        print(f"  {seq_dataset.task_names[t]:6s}: "
+              f"{np.mean(accs[t])*100:.4f}% ({np.std(accs[t])*100:.4f}%)")
+
+    # --- Embedding sim summary per task (nếu debug) ---
+    if args.debug and all_debug_rows and task_prompts is not None:
+        print("\n===== Embedding Similarity Analysis =====")
+        T = task_prompts.shape[0]
+        for t in range(num_tasks):
+            task_name = TASK_NAMES[t] if t < len(TASK_NAMES) else str(t)
+            rows_t = [r for r in all_debug_rows if r["task"] == t]
+            if not rows_t:
+                continue
+            tcp_acc = sum(r["tcp_correct"] for r in rows_t) / len(rows_t)
+            true_sim  = [r["true_task_sim"] for r in rows_t]
+            max_sim   = [r["max_task_sim"]  for r in rows_t]
+            print(f"\n  Task {t} {task_name} ({len(rows_t)} slides):")
+            print(f"    TCP routing acc  : {tcp_acc*100:.1f}%")
+            print(f"    Mean sim (true)  : {sum(true_sim)/len(true_sim):.4f}")
+            print(f"    Mean sim (max)   : {sum(max_sim)/len(max_sim):.4f}")
+            # Sim to each other task
+            print(f"    Mean sim to each task:")
+            for t2 in range(T):
+                t2_name = TASK_NAMES[t2] if t2 < len(TASK_NAMES) else str(t2)
+                col = f"task_sim_{t2}_{t2_name}"
+                if col in rows_t[0]:
+                    vals = [r[col] for r in rows_t]
+                    marker = " ← true" if t2 == t else (
+                        " *** HIGHEST" if abs(sum(vals)/len(vals) - max(sum([r[f'task_sim_{x}_{TASK_NAMES[x]}'] for r in rows_t])/len(rows_t) for x in range(T))) < 0.001 else ""
+                    )
+                    print(f"      → {t2_name:6s}: {sum(vals)/len(vals):.4f}{marker}")
+
+    # --- Save CSV ---
+    if args.debug and args.debug_csv and all_debug_rows:
+        fieldnames = list(all_debug_rows[0].keys())
+        with open(args.debug_csv, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(all_debug_rows)
+        print(f"\n[DEBUG] Saved {len(all_debug_rows)} rows → {args.debug_csv}")
