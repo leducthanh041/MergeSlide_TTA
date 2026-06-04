@@ -226,10 +226,14 @@ class MergeSlide_TTA_Adapter:
         ).item()
 
         # ── Phase 1d: Task routing cho adaptation ────────────────────────────
+        # t_adapt = None  →  naive mode: dùng global MLP [13 classes] xuyên suốt
+        # t_adapt = int   →  TASK-IL hoặc TCP mode: dùng task-specific MLP
         if task_id is not None:
-            t_adapt = task_id   # TASK-IL: ground-truth task
+            t_adapt = task_id                      # TASK-IL: ground-truth task
+        elif use_tcp_gate:
+            t_adapt = self._tcp_route(z_anchor)    # CLASS-IL TCP: anchor routing
         else:
-            t_adapt = self._tcp_route(z_anchor)   # CLASS-IL: anchor routing
+            t_adapt = None                         # CLASS-IL naive: global MLP
 
         # ── Phase 1e: DaPC pseudo-label (Module B) ───────────────────────────
         # Chọn threshold theo IND/OOD regime
@@ -240,24 +244,33 @@ class MergeSlide_TTA_Adapter:
             tau_ap = self.cfg.tau_ap_ood
             beta   = self.cfg.beta_ood
 
-        # Anchor task-specific prediction
-        y_anchor_task = F.softmax(self._task_logits(z_anchor, t_adapt), dim=-1)  # [1, n_cls]
-        max_anchor_task = y_anchor_task.max().item()
+        # Anchor prediction — global nếu naive, task-specific nếu TCP/TASK-IL
+        if t_adapt is None:
+            # Naive: tái dùng y_anchor_g [1, 13] đã tính ở Phase 1c
+            y_anchor_adapt   = y_anchor_g
+            max_anchor_adapt = max_anchor_g
+        else:
+            y_anchor_adapt   = F.softmax(self._task_logits(z_anchor, t_adapt), dim=-1)
+            max_anchor_adapt = y_anchor_adapt.max().item()
 
         use_aug = (max_anchor_g < tau_ap)
 
         if use_aug:
             # OOD regime: augmentation-averaged teacher (Module A)
-            y_tilde = self._aug_teacher_pred(features, coords, t_adapt, N)   # [1, n_cls]
+            # t_adapt=None → global MLP; t_adapt=int → task-specific
+            y_tilde = self._aug_teacher_pred(features, coords, t_adapt, N)
         else:
             # IND regime: direct teacher prediction
-            y_tilde = F.softmax(self._task_logits(z_teacher_std, t_adapt), dim=-1)
+            if t_adapt is None:
+                y_tilde = F.softmax(self._global_logits(z_teacher_std), dim=-1)   # [1, 13]
+            else:
+                y_tilde = F.softmax(self._task_logits(z_teacher_std, t_adapt), dim=-1)
 
         # DaPC blend
-        if beta * y_tilde.max().item() > max_anchor_task:
-            y_corrected = y_tilde.detach()           # OOD heavy: tin teacher
+        if beta * y_tilde.max().item() > max_anchor_adapt:
+            y_corrected = y_tilde.detach()
         else:
-            y_corrected = 0.5 * (y_tilde + y_anchor_task).detach()  # IND: blend
+            y_corrected = 0.5 * (y_tilde + y_anchor_adapt).detach()
 
         # ── Phase 2: Student forward (with grad) ─────────────────────────────
         self.student.train()
@@ -265,7 +278,11 @@ class MergeSlide_TTA_Adapter:
             z_s = self.student(feat_std, coord_std, self.ps)
         z_s_f32 = z_s.float()   # [1, 768] — explicit float32 cho loss
 
-        logits_s = self._task_logits(z_s_f32, t_adapt)   # [1, n_cls]
+        logits_s = (
+            self._global_logits(z_s_f32)               # naive: [1, 13]
+            if t_adapt is None
+            else self._task_logits(z_s_f32, t_adapt)   # tcp/taskil: [1, n_cls]
+        )
 
         # ── Phase 3: Loss computation (Module C — PETAL) ─────────────────────
         # Bayesian regularizer: log q(θ_s) ≈ -0.5 * Σ (θ-μ)²/(σ²+ε)
@@ -316,8 +333,10 @@ class MergeSlide_TTA_Adapter:
         if task_id is not None:
             # TASK-IL: ground-truth task → direct inference
             logits_inf = self._task_logits(z_inf, task_id)
-            pred_local  = int(logits_inf.argmax(-1).item())
-            pred_task   = task_id
+            pred_local = int(logits_inf.argmax(-1).item())
+            pred_task  = task_id
+            prob_inf   = F.softmax(logits_inf.float(), dim=-1)          # [1, n_cls_task]
+
         elif use_tcp_gate:
             # CLASS-IL với TCP Gate
             tcp_scores = F.softmax(z_inf.float() @ self.task_prompts.T, dim=-1)  # [1, T]
@@ -329,28 +348,37 @@ class MergeSlide_TTA_Adapter:
                 logits_inf = self._task_logits(z_inf, t_hat)
                 pred_local = int(logits_inf.argmax(-1).item())
                 pred_task  = t_hat
+                prob_inf   = F.softmax(logits_inf.float(), dim=-1)      # [1, n_cls_t_hat]
             else:
-                # Fallback: global MLP (current order)
-                logits_inf = self._global_logits(z_inf)   # [1, 13]
-                g_pred     = int(logits_inf.argmax(-1).item())
+                # Fallback: global MLP → extract local probs cho pred_task
+                g_logits = self._global_logits(z_inf)                   # [1, 13]
+                g_pred   = int(g_logits.argmax(-1).item())
                 pred_task, pred_local = self._global_to_task_local(g_pred)
+                g_prob   = F.softmax(g_logits.float(), dim=-1)          # [1, 13]
+                start, end = self.task_class_ranges[pred_task]
+                prob_inf = g_prob[:, start:end + 1]                     # [1, n_cls_pred_task]
+
         else:
-            # CLASS-IL naive: global MLP, no TCP gate
-            logits_inf = self._global_logits(z_inf)
+            # CLASS-IL naive: global MLP — trả về [1, 13] full probabilities
+            logits_inf = self._global_logits(z_inf)                     # [1, 13]
             g_pred     = int(logits_inf.argmax(-1).item())
             pred_task, pred_local = self._global_to_task_local(g_pred)
+            prob_inf   = F.softmax(logits_inf.float(), dim=-1)          # [1, 13]
+
+        # prob_np: numpy array, shape [n_cls_pred_task] hoặc [13] (naive)
+        prob_np = prob_inf.squeeze(0).detach().cpu().numpy()
 
         debug = {
-            "ood_score":   ood_score,
-            "eta_eff":     eta_eff,
-            "tcp_conf":    tcp_conf,
-            "t_adapt":     t_adapt,
-            "use_aug":     use_aug,
-            "loss_petal":  float(loss_petal.detach().item()),
-            "loss_class":  float(loss_class.detach().item()),
-            "loss_total":  float(loss_total.detach().item()),
+            "ood_score":  ood_score,
+            "eta_eff":    eta_eff,
+            "tcp_conf":   tcp_conf,
+            "t_adapt":    t_adapt,
+            "use_aug":    use_aug,
+            "loss_petal": float(loss_petal.detach().item()),
+            "loss_class": float(loss_class.detach().item()),
+            "loss_total": float(loss_total.detach().item()),
         }
-        return pred_local, pred_task, debug
+        return pred_local, pred_task, prob_np, debug
 
     def reset_to_source(self) -> None:
         """
@@ -426,22 +454,27 @@ class MergeSlide_TTA_Adapter:
         self,
         features: Tensor,
         coords: Tensor,
-        t_adapt: int,
+        t_adapt: Optional[int],   # None → global MLP (naive); int → task-specific
         N: int,
     ) -> Tensor:
         """
         Module A: WSI Bag-level Augmentation (Frozen-to-Paraffin).
         K lần subsample → K teacher predictions → average.
+        t_adapt=None  →  global 13-class predictions (classil_naive)
+        t_adapt=int   →  task-specific n_cls predictions (classil_tcp / taskil)
         """
         n_aug = max(1, int(self.cfg.r_patch * self.cfg.k_patches_std))
         n_aug = min(n_aug, N)
         preds = []
         with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
             for _ in range(self.cfg.K):
-                aug_idx  = torch.randperm(N, device=self.device)[:n_aug]
-                z_aug    = self.teacher(features[aug_idx], coords[aug_idx], self.ps).float()
-                preds.append(F.softmax(self._task_logits(z_aug, t_adapt), dim=-1))
-        return torch.stack(preds).mean(0)   # [1, n_cls]
+                aug_idx = torch.randperm(N, device=self.device)[:n_aug]
+                z_aug   = self.teacher(features[aug_idx], coords[aug_idx], self.ps).float()
+                if t_adapt is None:
+                    preds.append(F.softmax(self._global_logits(z_aug), dim=-1))
+                else:
+                    preds.append(F.softmax(self._task_logits(z_aug, t_adapt), dim=-1))
+        return torch.stack(preds).mean(0)   # [1, n_cls] hoặc [1, 13]
 
     def _bayesian_log_q(self) -> Tensor:
         """

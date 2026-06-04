@@ -70,8 +70,8 @@ run_to_logs() {
 
 # ── CLASS-IL TCP — OOD ────────────────────────────────────────────────────────
 run_to_logs \
-    "$LOG_DIR/result_tta_ood_classil_tcp.log" \
-    "$LOG_DIR/error_tta_ood_classil_tcp.log" \
+    "$LOG_DIR/test_new_run/result_tta_ood_classil_tcp.log" \
+    "$LOG_DIR/test_new_run/error_tta_ood_classil_tcp.log" \
     "$PYTHON_BIN" -u test_tta.py \
         --config           "$CONFIG" \
         --save_dir         "$FINETUNED_DIR" \
@@ -83,8 +83,8 @@ run_to_logs \
 
 # ── CLASS-IL Naive — OOD ──────────────────────────────────────────────────────
 run_to_logs \
-    "$LOG_DIR/result_tta_ood_classil_naive.log" \
-    "$LOG_DIR/error_tta_ood_classil_naive.log" \
+    "$LOG_DIR/test_new_run/result_tta_ood_classil_naive.log" \
+    "$LOG_DIR/test_new_run/error_tta_ood_classil_naive.log" \
     "$PYTHON_BIN" -u test_tta.py \
         --config           "$CONFIG" \
         --save_dir         "$FINETUNED_DIR" \
@@ -95,8 +95,8 @@ run_to_logs \
 
 # ── TASK-IL — OOD ─────────────────────────────────────────────────────────────
 run_to_logs \
-    "$LOG_DIR/result_tta_ood_taskil.log" \
-    "$LOG_DIR/error_tta_ood_taskil.log" \
+    "$LOG_DIR/test_taskIL/result_tta_ood_taskil.log" \
+    "$LOG_DIR/test_taskIL/error_tta_ood_taskil.log" \
     "$PYTHON_BIN" -u test_tta.py \
         --config           "$CONFIG" \
         --save_dir         "$FINETUNED_DIR" \
