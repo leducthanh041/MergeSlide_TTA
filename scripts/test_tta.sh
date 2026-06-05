@@ -98,29 +98,29 @@ run_to_logs() {
 }
 
 # ── CLASS-IL TCP (chính) ──────────────────────────────────────────────────────
-run_to_logs \
-    "$LOG_DIR/test_new_run/result_tta_classil_tcp.log" \
-    "$LOG_DIR/test_new_run/error_tta_classil_tcp.log" \
-    "$PYTHON_BIN" -u test_tta.py \
-        --config        "$CONFIG" \
-        --save_dir      "$FINETUNED_DIR" \
-        --merge_model_path "$MERGED_DIR" \
-        --swag_dir      "$SWAG_DIR" \
-        --mode          classil_tcp \
-        --result_csv    "$LOG_DIR/tta_results_classil_tcp.csv" \
-        --tta_stats_csv "$LOG_DIR/tta_stats_classil_tcp.csv"
+# run_to_logs \
+#     "$LOG_DIR/test_new_run/result_tta_classil_tcp.log" \
+#     "$LOG_DIR/test_new_run/error_tta_classil_tcp.log" \
+#     "$PYTHON_BIN" -u test_tta.py \
+#         --config        "$CONFIG" \
+#         --save_dir      "$FINETUNED_DIR" \
+#         --merge_model_path "$MERGED_DIR" \
+#         --swag_dir      "$SWAG_DIR" \
+#         --mode          classil_tcp \
+#         --result_csv    "$LOG_DIR/tta_results_classil_tcp.csv" \
+#         --tta_stats_csv "$LOG_DIR/tta_stats_classil_tcp.csv"
 
 # ── CLASS-IL Naive ────────────────────────────────────────────────────────────
-run_to_logs \
-    "$LOG_DIR/test_new_run/result_tta_classil_naive.log" \
-    "$LOG_DIR/test_new_run/error_tta_classil_naive.log" \
-    "$PYTHON_BIN" -u test_tta.py \
-        --config        "$CONFIG" \
-        --save_dir      "$FINETUNED_DIR" \
-        --merge_model_path "$MERGED_DIR" \
-        --swag_dir      "$SWAG_DIR" \
-        --mode          classil_naive \
-        --result_csv    "$LOG_DIR/tta_results_classil_naive.csv"
+# run_to_logs \
+#     "$LOG_DIR/test_new_run/result_tta_classil_naive.log" \
+#     "$LOG_DIR/test_new_run/error_tta_classil_naive.log" \
+#     "$PYTHON_BIN" -u test_tta.py \
+#         --config        "$CONFIG" \
+#         --save_dir      "$FINETUNED_DIR" \
+#         --merge_model_path "$MERGED_DIR" \
+#         --swag_dir      "$SWAG_DIR" \
+#         --mode          classil_naive \
+#         --result_csv    "$LOG_DIR/tta_results_classil_naive.csv"
 
 # ── TASK-IL ───────────────────────────────────────────────────────────────────
 run_to_logs \
