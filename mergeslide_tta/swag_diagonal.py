@@ -37,20 +37,27 @@ class SWAGDiagonal:
     """
 
     def __init__(self, model: nn.Module):
-        """
-        Args:
-            model: vision_encoder (TITAN backbone) sau khi đã load merged weights.
-        """
         self.n_collected = 0
+
+        # Chỉ track LayerNorm parameters
+        _ln_names = {
+            f"{mod_name}.{param_name}"
+            for mod_name, module in model.named_modules()
+            if isinstance(module, nn.LayerNorm)
+            for param_name, _ in module.named_parameters()
+        }
+
         # running mean E[theta]
         self._mean: dict[str, torch.Tensor] = {
             n: p.data.clone().zero_()
             for n, p in model.named_parameters()
+            if n in _ln_names
         }
         # running mean of squares E[theta^2]
         self._sq: dict[str, torch.Tensor] = {
             n: p.data.clone().zero_()
             for n, p in model.named_parameters()
+            if n in _ln_names
         }
 
     def update(self, model: nn.Module) -> None:

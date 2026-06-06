@@ -66,3 +66,6 @@ tta:
   tau_ood: 0.5
   ema_alpha: 0.999
   tau_task: 0.70
+  # SWAG posterior estimation
+  swag_epochs: 10
+  swag_lr: 1.0e-4

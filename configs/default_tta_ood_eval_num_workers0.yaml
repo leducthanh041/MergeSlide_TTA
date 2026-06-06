@@ -79,3 +79,7 @@ tta:
 
   # OOD: TCP gate threshold thấp hơn (ít reliable hơn)
   tau_task: 0.65
+
+  # SWAG posterior estimation
+  swag_epochs: 10
+  swag_lr: 1.5e-4

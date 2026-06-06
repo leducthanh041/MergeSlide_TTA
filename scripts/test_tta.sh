@@ -58,7 +58,7 @@ for name in logs checkpoints; do
     fi
 done
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$LOG_DIR/test_new_run" "$LOG_DIR/test_taskIL"
 export TMPDIR="${TMPDIR:-$MERGESLIDE_LOCAL_ROOT/tmp}"
 export SQLITE_TMPDIR="${SQLITE_TMPDIR:-$MERGESLIDE_LOCAL_ROOT/sqlite}"
 export HDF5_USE_FILE_LOCKING="${HDF5_USE_FILE_LOCKING:-FALSE}"
@@ -101,7 +101,8 @@ run_to_logs() {
 run_to_logs \
     "$LOG_DIR/test_new_run/result_tta_classil_tcp.log" \
     "$LOG_DIR/test_new_run/error_tta_classil_tcp.log" \
-    "$PYTHON_BIN" -u test_tta.py \
+    "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
+        --entrypoint    test_tta.py \
         --config        "$CONFIG" \
         --save_dir      "$FINETUNED_DIR" \
         --merge_model_path "$MERGED_DIR" \
@@ -114,7 +115,8 @@ run_to_logs \
 # run_to_logs \
 #     "$LOG_DIR/test_new_run/result_tta_classil_naive.log" \
 #     "$LOG_DIR/test_new_run/error_tta_classil_naive.log" \
-#     "$PYTHON_BIN" -u test_tta.py \
+#     "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
+#         --entrypoint    test_tta.py \
 #         --config        "$CONFIG" \
 #         --save_dir      "$FINETUNED_DIR" \
 #         --merge_model_path "$MERGED_DIR" \
@@ -126,7 +128,8 @@ run_to_logs \
 # run_to_logs \
 #     "$LOG_DIR/test_taskIL/result_tta_taskil.log" \
 #     "$LOG_DIR/test_taskIL/error_tta_taskil.log" \
-#     "$PYTHON_BIN" -u test_tta.py \
+#     "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
+#         --entrypoint    test_tta.py \
 #         --config        "$CONFIG" \
 #         --save_dir      "$FINETUNED_DIR" \
 #         --merge_model_path "$MERGED_DIR" \

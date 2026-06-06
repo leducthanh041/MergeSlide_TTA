@@ -155,22 +155,30 @@ class MergeSlide_TTA_Adapter:
         self.student = self._make_backbone(base_vision_encoder, backbone_sd, train=True)
         self.teacher = self._make_backbone(base_vision_encoder, backbone_sd, train=False)
 
-        # ── Identify LayerNorm trainable parameters in student ───────────────
-        self.ln_param_names: list[str] = [
-            name
-            for name, module in self.student.named_modules()
-            if isinstance(module, nn.LayerNorm)
-            for name_p, _ in module.named_parameters()
-            for name in [f"{name}.{name_p}"]  # flatten full name
-        ]
-        # Simpler: iterate student.named_parameters() and check requires_grad
+        # # ── Identify LayerNorm trainable parameters in student ───────────────
+        # self.ln_param_names: list[str] = [
+        #     name
+        #     for name, module in self.student.named_modules()
+        #     if isinstance(module, nn.LayerNorm)
+        #     for name_p, _ in module.named_parameters()
+        #     for name in [f"{name}.{name_p}"]  # flatten full name
+        # ]
+        # # Simpler: iterate student.named_parameters() and check requires_grad
+        # self.ln_param_names = [
+        #     n for n, p in self.student.named_parameters() if p.requires_grad
+        # ]
+
+        # # ── Optimizer (student LN params only) ──────────────────────────────
+        # ln_params = [p for p in self.student.parameters() if p.requires_grad]
+        # self.optimizer = torch.optim.AdamW(ln_params, lr=cfg.eta_base, weight_decay=0.0)
+
+        # Option A: toàn bộ vision_encoder params
         self.ln_param_names = [
             n for n, p in self.student.named_parameters() if p.requires_grad
-        ]
+        ]  # tên giữ nguyên để không break _bayesian_log_q, _compute_fim, _fim_restore
 
-        # ── Optimizer (student LN params only) ──────────────────────────────
-        ln_params = [p for p in self.student.parameters() if p.requires_grad]
-        self.optimizer = torch.optim.AdamW(ln_params, lr=cfg.eta_base, weight_decay=0.0)
+        all_params = [p for p in self.student.parameters() if p.requires_grad]
+        self.optimizer = torch.optim.AdamW(all_params, lr=cfg.eta_base, weight_decay=0.0)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Public API
@@ -397,8 +405,11 @@ class MergeSlide_TTA_Adapter:
         self.teacher.load_state_dict(merged_sd, strict=True)
 
         # Reset optimizer state
-        ln_params = [p for p in self.student.parameters() if p.requires_grad]
-        self.optimizer = torch.optim.AdamW(ln_params, lr=self.cfg.eta_base, weight_decay=0.0)
+        # ln_params = [p for p in self.student.parameters() if p.requires_grad]
+        # self.optimizer = torch.optim.AdamW(ln_params, lr=self.cfg.eta_base, weight_decay=0.0)
+
+        all_params = [p for p in self.student.parameters() if p.requires_grad]
+        self.optimizer = torch.optim.AdamW(all_params, lr=self.cfg.eta_base, weight_decay=0.0)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Private helpers
@@ -411,15 +422,24 @@ class MergeSlide_TTA_Adapter:
         bb = copy.deepcopy(base).to(self.device)
         bb.load_state_dict(sd, strict=True)
 
+        # if train:
+        #     bb.train()
+        #     # Disable all grad, then enable only LayerNorm
+        #     for p in bb.parameters():
+        #         p.requires_grad_(False)
+        #     for m in bb.modules():
+        #         if isinstance(m, nn.LayerNorm):
+        #             for p in m.parameters():
+        #                 p.requires_grad_(True)
+        # else:
+        #     bb.eval()
+        #     for p in bb.parameters():
+        #         p.requires_grad_(False)
+
         if train:
             bb.train()
-            # Disable all grad, then enable only LayerNorm
             for p in bb.parameters():
-                p.requires_grad_(False)
-            for m in bb.modules():
-                if isinstance(m, nn.LayerNorm):
-                    for p in m.parameters():
-                        p.requires_grad_(True)
+                p.requires_grad_(True)   # toàn bộ params trainable
         else:
             bb.eval()
             for p in bb.parameters():

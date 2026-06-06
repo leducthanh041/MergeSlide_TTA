@@ -82,3 +82,7 @@ tta:
 
   # Phase 7 — TCP Confidence Gate
   tau_task: 0.70    # min TCP confidence để dùng routing (fallback nếu thấp hơn)
+
+  # SWAG posterior estimation
+  swag_epochs: 10
+  swag_lr: 1.0e-4
