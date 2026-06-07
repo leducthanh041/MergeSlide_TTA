@@ -96,6 +96,7 @@ old_scripts_tta/
 old_code_mergeslide/
 related_work/
 checkpoints_nfs_backup_*/
+docs/
 docs_old/
 
 # ---------------------------------------------------------------------------
