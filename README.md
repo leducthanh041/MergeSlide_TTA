@@ -1,20 +1,68 @@
-# [WACV 2026] MergeSlide: Continual Model Merging and Task-to-Class Prompt-Aligned Inference for Lifelong Learning on Whole Slide Images
+# MergeSlide-TTA
 
-<p align="center">
-  <a href="https://arxiv.org/abs/2511.13099"><img src="https://img.shields.io/badge/arXiv-2511.13099-b31b1b.svg" alt="Arxiv"></a>
-  <a href="https://wacv.thecvf.com/"><img src="https://img.shields.io/badge/WACV-2026-blue.svg" alt="WACV2026"></a>
-</p>
+MergeSlide-TTA is a test-time adaptation extension for MergeSlide-style continual learning on whole-slide images (WSIs). The current pipeline uses TITAN WSI representations, per-task finetuning, sequential model merging, SWAG-diagonal posterior estimation, and TTA inference for CLASS-IL and TASK-IL settings.
 
-> Doanh C. Bui (NAIST)*, Ba Hung Ngo (CNU), Hoai Luan Pham (NAIST), Khang Nguyen (UIT), Mai K. Nguyen (ETIS), Yasuhiko Nakashima (NAIST)
+This repository is prepared for a MICCAI workshop submission. The method is not yet publicly released as a paper.
 
-This branch is a cleaned MergeSlide WSI codebase with repo-local scripts for TITAN finetuning, OPCM merging, CLASS-IL/TASK-IL evaluation, and safer execution on the `/mmlab_students` NFS filesystem.
+## Overview
 
-## 1. Runtime Setup
+The full workflow is:
 
-Install the Python stack from `requirements.txt`. The scripts default to the local environment:
+```text
+Preprocessed WSIs by TRIDENT
+        |
+        v
+TITAN feature bags + coordinates
+        |
+        v
+Per-task finetuning
+        |
+        v
+Sequential model merging
+        |
+        v
+SWAG-diagonal posterior estimation
+        |
+        v
+Inference with MergeSlide-TTA
+```
+
+The base MergeSlide evaluation entrypoints are:
+
+- `test_classIL_task_prompt.py`: CLASS-IL evaluation with TCP routing or naive global classification.
+- `test_classIL_task_prompt_other_metrics.py`: CLASS-IL continual metrics such as BWT/FGT-style analysis.
+- `test_taskIL.py`: TASK-IL evaluation where the task identity is known at inference time.
+
+The TTA entrypoint is:
+
+- `test_tta.py`: CLASS-IL TCP, CLASS-IL naive, and TASK-IL inference with test-time adaptation.
+
+## Environment
+
+The code has been tested on a Linux server with:
+
+- Python 3.10
+- CUDA-enabled PyTorch
+- NVIDIA RTX 2080 Ti GPUs with 11 GB VRAM
+- TITAN loaded from Hugging Face: `MahmoodLab/TITAN`
+
+Create and activate a Python environment:
 
 ```bash
-/mmlab_students/storageStudents/nguyenvd/anaconda3/envs/mergePre/bin/python3.10
+conda create -n mergeslide_tta python=3.10 -y
+conda activate mergeslide_tta
+```
+
+Install PyTorch for your CUDA version first. For example, follow the official selector:
+
+```text
+https://pytorch.org/get-started/locally/
+```
+
+Then install the remaining dependencies:
+
+```bash
+pip install -r requirements.txt
 ```
 
 TITAN is loaded with:
@@ -23,274 +71,378 @@ TITAN is loaded with:
 AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
 ```
 
-Make sure the environment has GPU access and permission to load TITAN from Hugging Face before running full training or evaluation.
+Make sure your environment can access the Hugging Face model before launching full training or evaluation.
 
-## 2. Storage Layout
+## Preprocessed WSI Features
 
-Use NFS only for source code and read-heavy datasets:
+This code expects WSIs to be preprocessed before training. In our workflow, WSIs are processed with TRIDENT to obtain patch-level feature bags and patch coordinates.
 
-```text
-/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA
-/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset
-```
-
-Use local SSD `/docker` for hot writes:
+At a high level, each slide should provide:
 
 ```text
-/docker/data/$USER/MergeSlide_TTA/logs
-/docker/data/$USER/MergeSlide_TTA/checkpoints
-/docker/data/$USER/MergeSlide_TTA/checkpoints_ood
-/docker/data/$USER/MergeSlide_TTA/sqlite
-/docker/data/$USER/MergeSlide_TTA/tmp
+features: [N, 768]
+coords:   [N, 2]
 ```
 
-The provided scripts create repo symlinks when missing:
-
-```text
-logs -> /docker/data/$USER/MergeSlide_TTA/logs
-checkpoints -> /docker/data/$USER/MergeSlide_TTA/checkpoints
-checkpoints_ood -> /docker/data/$USER/MergeSlide_TTA/checkpoints_ood
-```
-
-You can choose a dedicated log directory per run:
+The repository supports a PT-first feature loading wrapper:
 
 ```bash
-LOG_DIR=/docker/data/$USER/MergeSlide_TTA/logs/my_run bash scripts/test_classIL.sh
+tools/run_classil_with_pt_features.py
 ```
 
-## 3. Project Structure
+The wrapper uses `.pt` feature tensors when the patch count matches the coordinate file, and falls back to H5 features only when necessary. This is the recommended path for training, evaluation, and TTA scripts.
+
+Dataset-specific annotation and feature locations are configured through YAML files under `configs/`. Adjust those config files to match your local preprocessed TRIDENT outputs.
+
+## Checkpoints
+
+The pipeline expects three checkpoint stages:
 
 ```text
-MergeSlide_TTA/
-├── train.py
-├── merge.py
-├── test_classIL_task_prompt.py
-├── test_classIL_task_prompt_other_metrics.py
-├── test_taskIL.py
-├── task_prompts.pt
-├── configs/
-├── scripts/
-├── tools/
-│   └── run_classil_with_pt_features.py
-└── mergeslide_tta/
-    ├── constants.py
-    ├── datasets.py
-    ├── prompts_zeroshot.py
-    ├── utils.py
-    └── checkpoint_mirror.py
+finetuned/
+merged/
+swag_diagonal/
 ```
 
-Important entrypoints:
-
-- `train.py`: per-task TITAN finetuning. Saves `fold_{k}/task_{t}.pt`.
-- `merge.py`: OPCM sequential model merging. Saves intermediate and final merged checkpoints.
-- `test_classIL_task_prompt.py`: CLASS-IL final-task evaluation with `tcp` or `naive` mode.
-- `test_classIL_task_prompt_other_metrics.py`: CLASS-IL continual metrics, including forgetting/BWT/FWT-style evaluation.
-- `test_taskIL.py`: TASK-IL evaluation where the test task is known.
-- `tools/run_classil_with_pt_features.py`: wrapper used by scripts to prefer `.pt` feature tensors, avoid problematic H5 feature reads when possible, force stable per-class metric shapes, and keep DataLoader multiprocessing disabled through `*_num_workers0.yaml` configs.
-
-## 4. Dataset Configs
-
-The current configs point to:
+For convenience, pretrained checkpoints will be provided here:
 
 ```text
-/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset
+TODO: add Google Drive checkpoint link
 ```
 
-IND annotations:
+Expected structure:
 
 ```text
-wsi_dataset_annotation/
+checkpoints/
+  finetuned/
+  merged/
+  swag_diagonal/
+
+checkpoints_ood/
+  finetuned/
+  merged/
+  swag_diagonal/
 ```
 
-OOD/cross-site annotations:
+Reverse-order experiments use:
 
 ```text
-wsi_dataset_annotation_cross_sites/
+checkpoints/
+  finetuned_reverse/
+  merged_reverse/
+  swag_diagonal_reverse/
 ```
 
-Main config files:
+## Configs
 
-- `configs/default.yaml`: IND forward order, training-style `num_workers`.
-- `configs/default_eval_num_workers0.yaml`: IND forward order, evaluation-safe `num_workers: 0`.
-- `configs/default_reverse.yaml`: IND reverse order.
-- `configs/default_reverse_eval_num_workers0.yaml`: IND reverse order, evaluation-safe `num_workers: 0`.
-- `configs/default_ood.yaml`: OOD forward order.
-- `configs/default_ood_eval_num_workers0.yaml`: OOD forward order, evaluation-safe `num_workers: 0`.
+Common configs:
 
-Task stream:
+- `configs/default_eval_num_workers0.yaml`: IND forward evaluation/training-safe config.
+- `configs/default_reverse_eval_num_workers0.yaml`: IND reverse config.
+- `configs/default_ood_eval_num_workers0.yaml`: OOD/cross-site config.
+- `configs/default_tta_eval_num_workers0.yaml`: IND forward TTA config.
+- `configs/default_tta_reverse_eval_num_workers0.yaml`: IND reverse TTA config.
+- `configs/default_tta_ood_eval_num_workers0.yaml`: OOD/cross-site TTA config.
 
-```text
-BRCA -> RCC -> NSCLC -> ESCA -> TGCT -> CESC
-```
+The `*_num_workers0.yaml` configs are recommended for reproducible runs and safer WSI feature loading.
 
-Reverse configs invert this order internally.
+## Base MergeSlide Pipeline
 
-## 5. Scripts
+Run commands from the repository root.
 
-Run scripts from the repo root.
-
-### Finetuning
+### 1. Per-Task Finetuning
 
 ```bash
 bash scripts/finetune.sh
 ```
 
-Defaults:
-
-- entrypoint: `train.py`
-- config: `configs/default_ood_eval_num_workers0.yaml`
-- save dir: `/docker/data/$USER/MergeSlide_TTA/checkpoints_ood/finetuned`
-- logs: `$LOG_DIR/result_train.log`, `$LOG_DIR/error_train.log`
-
-Common overrides:
+Useful overrides:
 
 ```bash
 CONFIG=configs/default_eval_num_workers0.yaml \
-SAVE_DIR=/docker/data/$USER/MergeSlide_TTA/checkpoints/finetuned \
+SAVE_DIR=./checkpoints/finetuned \
 FOLD_START=0 FOLD_END=10 \
 bash scripts/finetune.sh
 ```
 
-### Merging
+For OOD/cross-site:
+
+```bash
+CONFIG=configs/default_ood_eval_num_workers0.yaml \
+SAVE_DIR=./checkpoints_ood/finetuned \
+bash scripts/finetune.sh
+```
+
+Main Python entrypoint:
+
+```text
+train.py
+```
+
+### 2. Sequential Model Merging
 
 ```bash
 bash scripts/mergemodel.sh
 ```
 
-Defaults:
-
-- entrypoint: `merge.py`
-- config: `configs/default_ood_eval_num_workers0.yaml`
-- finetuned dir: `/docker/data/$USER/MergeSlide_TTA/checkpoints_ood/finetuned`
-- merged dir: `/docker/data/$USER/MergeSlide_TTA/checkpoints_ood/merged`
-- logs: `$LOG_DIR/result_merge_ood.log`, `$LOG_DIR/error_merge_ood.log`
-
-Common overrides:
+Useful overrides:
 
 ```bash
 CONFIG=configs/default_eval_num_workers0.yaml \
-FINETUNED_DIR=/docker/data/$USER/MergeSlide_TTA/checkpoints/finetuned \
-MERGED_DIR=/docker/data/$USER/MergeSlide_TTA/checkpoints/merged \
+FINETUNED_DIR=./checkpoints/finetuned \
+MERGED_DIR=./checkpoints/merged \
 bash scripts/mergemodel.sh
 ```
 
-### CLASS-IL Final Evaluation
+For OOD/cross-site:
 
 ```bash
-LOG_DIR=/docker/data/$USER/MergeSlide_TTA/logs/classil_eval bash scripts/test_classIL.sh
+CONFIG=configs/default_ood_eval_num_workers0.yaml \
+FINETUNED_DIR=./checkpoints_ood/finetuned \
+MERGED_DIR=./checkpoints_ood/merged \
+bash scripts/mergemodel.sh
 ```
 
-Current script runs the enabled CLASS-IL commands in `scripts/test_classIL.sh`. It uses `tools/run_classil_with_pt_features.py`, writes logs into `$LOG_DIR`, and keeps hot writes on `/docker`.
-
-If TCP runs are commented out in the script for a specific experiment, uncomment the corresponding `run_to_logs` block before launching.
-
-### CLASS-IL Other Metrics
-
-```bash
-LOG_DIR=/docker/data/$USER/MergeSlide_TTA/logs/classil_other_metrics bash scripts/test_classIL_other_metrics.sh
-```
-
-This script wraps `test_classIL_task_prompt_other_metrics.py` through the PT-first wrapper and logs to `$LOG_DIR`.
-
-### TASK-IL Evaluation
-
-```bash
-LOG_DIR=/docker/data/$USER/MergeSlide_TTA/logs/taskil_eval bash scripts/test_taskIL.sh
-```
-
-The current script defaults to OOD config/checkpoints:
+Main Python entrypoint:
 
 ```text
-configs/default_ood_eval_num_workers0.yaml
-./checkpoints_ood/finetuned
-./checkpoints_ood/merged
+merge.py
 ```
 
-Override these variables if you want IND checkpoints:
+### 3. Base CLASS-IL Evaluation
 
 ```bash
-CONFIG_FORWARD=configs/default_eval_num_workers0.yaml \
-bash scripts/test_taskIL.sh
+bash scripts/test_classIL.sh
 ```
 
-### Diagnostic CLASS-IL TCP Scripts
+This script calls:
 
-Two diagnostic scripts may exist locally:
-
-```bash
-bash scripts/test_classIL_tcp_num_workers0.sh
-bash scripts/test_classIL_tcp_pt_features_num_workers0.sh
+```text
+test_classIL_task_prompt.py
 ```
 
-Use the PT-first version when H5 feature reads on NFS hang. Both are lightweight launch wrappers, not separate methods.
+Modes:
 
-## 6. Direct Python Commands
+- `tcp`: task-to-class prompt routing.
+- `naive`: global class prediction without TCP routing.
 
-The scripts are preferred because they set log paths, local hot-write paths, HDF5 locking behavior, and `num_workers: 0` configs. If you run Python directly, use the wrapper for eval:
+Direct command example:
 
 ```bash
 python -u tools/run_classil_with_pt_features.py \
+  --entrypoint test_classIL_task_prompt.py \
   --config configs/default_eval_num_workers0.yaml \
   --save_dir ./checkpoints/finetuned \
   --merge_model_path ./checkpoints/merged \
   --mode tcp
 ```
 
-Direct entrypoints are still valid when you explicitly want the raw behavior:
+### 4. Base CLASS-IL Other Metrics
 
 ```bash
-python train.py --config configs/default.yaml --save_dir ./checkpoints/finetuned
-python merge.py --config configs/default.yaml --finetuned_checkpoints ./checkpoints/finetuned --merged_checkpoints ./checkpoints/merged
-python test_taskIL.py --config configs/default_eval_num_workers0.yaml --save_dir ./checkpoints/finetuned --merge_model_path ./checkpoints/merged
+bash scripts/test_classIL_other_metrics.sh
 ```
 
-## 7. Route Debugging
+This script calls:
 
-`test_classIL_task_prompt.py` supports TCP routing diagnostics:
+```text
+test_classIL_task_prompt_other_metrics.py
+```
+
+Use it after the base CLASS-IL evaluation when reporting continual-learning metrics beyond final-task accuracy.
+
+### 5. Base TASK-IL Evaluation
+
+```bash
+bash scripts/test_taskIL.sh
+```
+
+This script calls:
+
+```text
+test_taskIL.py
+```
+
+TASK-IL assumes the task identity is known during inference.
+
+## MergeSlide-TTA Pipeline
+
+MergeSlide-TTA adds a SWAG-diagonal posterior and test-time adaptation stage after finetuning and merging.
+
+### 1. Train SWAG-Diagonal Statistics
+
+Run all supported settings:
+
+```bash
+bash scripts/train_swag.sh
+```
+
+Run one setting only:
+
+```bash
+SETTING=ind bash scripts/train_swag.sh
+SETTING=reverse bash scripts/train_swag.sh
+SETTING=ood bash scripts/train_swag.sh
+```
+
+Run a fold subset:
+
+```bash
+SETTING=ind FOLD_START=0 FOLD_END=5 bash scripts/train_swag.sh
+```
+
+Main Python entrypoint:
+
+```text
+train_swag.py
+```
+
+Outputs are expected under:
+
+```text
+./checkpoints/swag_diagonal
+./checkpoints/swag_diagonal_reverse
+./checkpoints_ood/swag_diagonal
+```
+
+### 2. TTA Inference: IND Forward
+
+```bash
+bash scripts/test_tta.sh
+```
+
+This script uses:
+
+```text
+test_tta.py
+configs/default_tta_eval_num_workers0.yaml
+./checkpoints/finetuned
+./checkpoints/merged
+./checkpoints/swag_diagonal
+```
+
+The script can run CLASS-IL TCP, CLASS-IL naive, and TASK-IL blocks. Enable or disable blocks directly in the script for the experiment you want to report.
+
+### 3. TTA Inference: IND Reverse
+
+```bash
+bash scripts/test_tta_reverse.sh
+```
+
+This script uses:
+
+```text
+test_tta.py
+configs/default_tta_reverse_eval_num_workers0.yaml
+./checkpoints/finetuned_reverse
+./checkpoints/merged_reverse
+./checkpoints/swag_diagonal_reverse
+```
+
+### 4. TTA Inference: OOD/Cross-Site
+
+```bash
+bash scripts/test_tta_ood.sh
+```
+
+This script uses:
+
+```text
+test_tta.py
+configs/default_tta_ood_eval_num_workers0.yaml
+./checkpoints_ood/finetuned
+./checkpoints_ood/merged
+./checkpoints_ood/swag_diagonal
+```
+
+## Direct TTA Commands
+
+CLASS-IL TCP:
 
 ```bash
 python -u tools/run_classil_with_pt_features.py \
-  --config configs/default_eval_num_workers0.yaml \
+  --entrypoint test_tta.py \
+  --config configs/default_tta_eval_num_workers0.yaml \
   --save_dir ./checkpoints/finetuned \
   --merge_model_path ./checkpoints/merged \
-  --mode tcp \
-  --debug_route \
-  --debug_route_csv logs/debug_route_tcp.csv
+  --swag_dir ./checkpoints/swag_diagonal \
+  --mode classil_tcp
 ```
 
-The CSV records per-slide routing scores and top-k task predictions. It is useful for inspecting task-prompt routing failures such as CESC being routed to ESCA.
-
-## 8. Validation
-
-Use lightweight checks after code edits:
+CLASS-IL naive:
 
 ```bash
-python -m py_compile train.py merge.py test_classIL_task_prompt.py test_classIL_task_prompt_other_metrics.py test_taskIL.py tools/run_classil_with_pt_features.py
-python -m compileall -q mergeslide_tta
-bash -n scripts/finetune.sh scripts/mergemodel.sh scripts/test_classIL.sh scripts/test_classIL_other_metrics.sh scripts/test_taskIL.sh
+python -u tools/run_classil_with_pt_features.py \
+  --entrypoint test_tta.py \
+  --config configs/default_tta_eval_num_workers0.yaml \
+  --save_dir ./checkpoints/finetuned \
+  --merge_model_path ./checkpoints/merged \
+  --swag_dir ./checkpoints/swag_diagonal \
+  --mode classil_naive
 ```
 
-Do not run full training, merging, or evaluation without confirming GPU, TITAN/Hugging Face access, dataset paths, fold range, and checkpoint paths.
+TASK-IL:
 
-## 9. Citation
-
-If you find this work useful in your research, please cite:
-
-```bibtex
-@inproceedings{
-    bui2026merge,
-    title={MergeSlide: Continual Model Merging and Task-to-Class Prompt-Aligned Inference for Lifelong Learning on Whole Slide Images},
-    author={Doanh C. Bui, Ba Hung Ngo, Hoai Luan Pham, Khang Nguyen, Mai K. Nguyen, Yasuhiko Nakashima},
-    booktitle={The IEEE/CVF Winter Conference on Applications of Computer Vision},
-    year={2026},
-}
+```bash
+python -u tools/run_classil_with_pt_features.py \
+  --entrypoint test_tta.py \
+  --config configs/default_tta_eval_num_workers0.yaml \
+  --save_dir ./checkpoints/finetuned \
+  --merge_model_path ./checkpoints/merged \
+  --swag_dir ./checkpoints/swag_diagonal \
+  --mode taskil
 ```
 
-## 10. Acknowledgement
+Useful flags:
 
-This project builds on ideas and code from:
+- `--episodic`: reset the adapted model before each slide.
+- `--no_reset_per_task`: do not reset adaptation state between tasks.
+- `--fold_start` and `--fold_end`: run a subset of folds.
 
-- [TITAN](https://github.com/mahmoodlab/TITAN)
-- [FusionBench](https://github.com/tanganke/fusion_bench)
-- [CATE](https://github.com/HKU-MedAI/CATE)
+## Inference Modes
+
+`test_tta.py` supports:
+
+- `classil_tcp`: CLASS-IL inference with TCP routing over task prompts.
+- `classil_naive`: CLASS-IL inference with the global class head.
+- `taskil`: TASK-IL inference using the known task identity.
+
+Base MergeSlide uses:
+
+- `tcp` in `test_classIL_task_prompt.py`.
+- `naive` in `test_classIL_task_prompt.py`.
+- TASK-IL evaluation in `test_taskIL.py`.
+
+## Hardware Notes
+
+The current experiments were run on single-GPU jobs. The implementation is compatible with a single 11 GB GPU for evaluation/TTA in the tested setup, but full finetuning and SWAG estimation may require careful fold-wise scheduling.
+
+Recommended runtime settings:
+
+- Use batch size 1 for WSI bags.
+- Use `num_workers: 0` for stable feature loading.
+- Use `tools/run_classil_with_pt_features.py` for training/evaluation/TTA commands.
+- Run fold subsets first before launching full 10-fold experiments.
+
+## Repository Map
+
+```text
+configs/                         YAML configs for IND, reverse, OOD, and TTA
+scripts/                         Bash launchers for finetune/merge/SWAG/eval/TTA
+tools/run_classil_with_pt_features.py
+                                  PT-first wrapper for robust feature loading
+mergeslide_tta/                   Dataset, prompt, model, SWAG, and TTA utilities
+train.py                          Per-task finetuning
+merge.py                          Sequential model merging
+train_swag.py                     SWAG-diagonal posterior estimation
+test_tta.py                       MergeSlide-TTA inference
+test_classIL_task_prompt.py       Base CLASS-IL inference
+test_classIL_task_prompt_other_metrics.py
+                                  Base CLASS-IL continual metrics
+test_taskIL.py                    Base TASK-IL inference
+task_prompts.pt                   Task prompt embeddings used by TCP routing
+```
+
+## Citation
+
+This work is under submission. Citation information will be added after publication.

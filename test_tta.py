@@ -316,6 +316,7 @@ if __name__ == "__main__":
     seq_dataset  = Sequential_Generic_MIL_Dataset(cfg)
     num_tasks    = cfg.training.num_tasks
     num_classes  = seq_dataset.num_classes     # list[int], per task
+    total_classes = sum(num_classes)
     order        = getattr(cfg.dataset, "order", "forward")
 
     print("Building prompt classifier ...")
@@ -381,7 +382,7 @@ if __name__ == "__main__":
         # Per-fold inner accumulators
         all_accs:   list[float] = []
         all_baccs:  list[float] = []
-        all_aucs_fold: list[float] = []
+        all_aucs_fold = np.full(total_classes, np.nan, dtype=float)
         all_preds_g:   list[np.ndarray] = []
         all_targets_g: list[np.ndarray] = []
         acc_per_task:  dict[int, float] = {}
@@ -432,21 +433,20 @@ if __name__ == "__main__":
                 for g_idx in global_idxs:
                     if probs_arr.shape[1] > g_idx:
                         try:
-                            auc = roc_auc_score(
+                            all_aucs_fold[g_idx] = roc_auc_score(
                                 (targets_arr == g_idx).astype(int), probs_arr[:, g_idx]
                             )
-                            all_aucs_fold.append(auc)
                         except ValueError:
                             pass
             else:
                 # Local class indices (matching eval_task_tcp)
+                global_idxs = sorted(seq_dataset.task_to_global_class[task_id].values())
                 for i in range(n_cls):
                     if i < probs_arr.shape[1]:
                         try:
-                            auc = roc_auc_score(
+                            all_aucs_fold[global_idxs[i]] = roc_auc_score(
                                 (targets_arr == i).astype(int), probs_arr[:, i]
                             )
-                            all_aucs_fold.append(auc)
                         except ValueError:
                             pass
 
@@ -495,7 +495,7 @@ if __name__ == "__main__":
         overall_weighted_f1s.append(fold_weighted_f1)
         overall_recalls.append(fold_recall)
         overall_precisions.append(fold_precision)
-        overall_aucs.append(np.array(all_aucs_fold))
+        overall_aucs.append(all_aucs_fold)
         overall_times.append(fold_time / num_tasks)
         all_acc_per_task.append(acc_per_task)
         overall_tta_diag.append({k: np.mean(v) for k, v in fold_diag.items()})
@@ -518,11 +518,18 @@ if __name__ == "__main__":
     # Recall / Precision / AUC per class
     def _fmt_per_class(arrays: list[np.ndarray], label: str) -> None:
         stacked = np.stack([a for a in arrays if len(a) > 0])
-        means   = np.mean(stacked, axis=0)
-        stds    = np.std(stacked, axis=0)
+        if np.isnan(stacked).any():
+            means = np.nanmean(stacked, axis=0)
+            stds  = np.nanstd(stacked, axis=0)
+        else:
+            means = np.mean(stacked, axis=0)
+            stds  = np.std(stacked, axis=0)
         print(f"\n{label}:")
         for m, s in zip(means, stds):
-            print(f"  {m*100:.4f}% ({s*100:.4f}%)")
+            if np.isnan(m):
+                print("  nan% (nan%)")
+            else:
+                print(f"  {m*100:.4f}% ({s*100:.4f}%)")
 
     _fmt_per_class(overall_recalls,    "Recall per class")
     _fmt_per_class(overall_precisions, "Precision per class")
