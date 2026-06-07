@@ -1,0 +1,71 @@
+# configs/default_tta_reverse_eval_num_workers0.yaml
+# TTA evaluation config — IND reverse order (C→T→E→N→R→B), num_workers=0
+
+dataset:
+  root: "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset"
+
+  order: "reverse"
+
+  brca:
+    csv: "${dataset.root}/wsi_dataset_annotation/tcga_brca/tcga_brca_subset.csv"
+    features: "${dataset.root}/TCGA-BRCA_processed/features/"
+    splits: "${dataset.root}/wsi_dataset_annotation/tcga_brca"
+
+  rcc:
+    csv: "${dataset.root}/wsi_dataset_annotation/tcga_rcc/tcga_kidney_subset.csv"
+    features: "${dataset.root}/TCGA-RCC_processed/features/"
+    splits: "${dataset.root}/wsi_dataset_annotation/tcga_rcc"
+
+  nsclc:
+    csv: "${dataset.root}/wsi_dataset_annotation/tcga_nsclc/tcga_lung_subset.csv"
+    features: "${dataset.root}/TCGA-NSCLC_processed/features/"
+    splits: "${dataset.root}/wsi_dataset_annotation/tcga_nsclc"
+
+  esca:
+    features: "${dataset.root}/TCGA-ESCA_processed/features/"
+    splits: "${dataset.root}/wsi_dataset_annotation/tcga_esca"
+
+  tgct:
+    features: "${dataset.root}/TCGA-TGCT_processed/features/"
+    splits: "${dataset.root}/wsi_dataset_annotation/tcga_tgct"
+
+  cesc:
+    features: "${dataset.root}/TCGA-CESC_processed/features/"
+    splits: "${dataset.root}/wsi_dataset_annotation/tcga_cesc"
+
+training:
+  num_epochs: 10
+  lr: 1.0e-5
+  weight_decay: 1.0e-4
+  seed: 0
+  num_folds: 10
+  num_tasks: 6
+
+dataloader:
+  batch_size: 1
+  num_workers: 0
+
+paths:
+  task_prompts: "./task_prompts.pt"
+  finetuned_checkpoints: "./checkpoints/finetuned_reverse"
+  merged_checkpoints: "./checkpoints/merged_reverse"
+
+tta:
+  K: 8
+  r_patch: 0.75
+  tau_ap_ind: 0.92
+  tau_ap_ood: 0.70
+  beta_ind: 1.2
+  beta_ood: 1.5
+  spw: 1.0e-6
+  lam_ce: 1.0
+  gamma_class: 1.0
+  tau_c: 0.07
+  delta: 0.03
+  eta_base: 1.0e-4
+  tau_ood: 0.5
+  ema_alpha: 0.999
+  tau_task: 0.70
+  # SWAG posterior estimation
+  swag_epochs: 10
+  swag_lr: 1.0e-4
