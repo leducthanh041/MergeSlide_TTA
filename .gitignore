@@ -108,8 +108,6 @@ convert_trident_h5_to_pt.py
 create_trident_mpp_csv.py
 flatten_wsi_dataset.py
 zip_tcga_datasets.py
-tune_tta_grid_search.py
-tune_tta_grid_search.sh
 
 # ---------------------------------------------------------------------------
 # Invalid or backup shell files
