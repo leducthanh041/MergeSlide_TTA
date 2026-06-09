@@ -277,6 +277,10 @@ run_phase() {
     "$PYTHON_BIN" -u "$TUNE_ENTRYPOINT" \
         --phase "$phase" \
         --setting "$SETTING" \
+        --base_config "$base_config" \
+        --merge_dir "$MERGE_DIR" \
+        --swag_dir "$SWAG_DIR" \
+        --finetuned_dir "$FINETUNED_DIR" \
         --output_dir "$phase_root" \
         --summarize_only
 }
@@ -307,7 +311,8 @@ with open(out_config, "w") as f:
     yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
 print(f"[INFO] patched phase-2 config -> {out_config}")
 for key in keys:
-    print(f"[INFO] {key}={cfg[\"tta\"][key]}")
+    value = cfg["tta"][key]
+    print(f"[INFO] {key}={value}")
 ' "$source_config" "$best_json" "$out_config"
 }
 

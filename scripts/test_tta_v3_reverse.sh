@@ -70,44 +70,44 @@ run_to_logs() {
     "$@" >> "$result_log" 2>> "$error_log"
 }
 
-# # ── CLASS-IL TCP — Reverse ────────────────────────────────────────────────────
+# ── CLASS-IL TCP — Reverse ────────────────────────────────────────────────────
+run_to_logs \
+    "$LOG_DIR/test_new_run/result_tta_v3_re_classil_tcp.log" \
+    "$LOG_DIR/test_new_run/error_tta_v3_re_classil_tcp.log" \
+    "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
+        --entrypoint       test_tta_v3.py \
+        --config           "$CONFIG" \
+        --save_dir         "$FINETUNED_DIR" \
+        --merge_model_path "$MERGED_DIR" \
+        --swag_dir         "$SWAG_DIR" \
+        --mode             classil_tcp \
+        --result_csv       "$LOG_DIR/tta_v3_results_re_classil_tcp.csv" \
+        --tta_stats_csv    "$LOG_DIR/tta_v3_stats_re_classil_tcp.csv"
+
+# # ── CLASS-IL Naive — Reverse ──────────────────────────────────────────────────
 # run_to_logs \
-#     "$LOG_DIR/test_new_run/result_tta_v3_re_classil_tcp.log" \
-#     "$LOG_DIR/test_new_run/error_tta_v3_re_classil_tcp.log" \
+#     "$LOG_DIR/test_new_run/result_tta_v3_re_classil_naive.log" \
+#     "$LOG_DIR/test_new_run/error_tta_v3_re_classil_naive.log" \
 #     "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
 #         --entrypoint       test_tta_v3.py \
 #         --config           "$CONFIG" \
 #         --save_dir         "$FINETUNED_DIR" \
 #         --merge_model_path "$MERGED_DIR" \
 #         --swag_dir         "$SWAG_DIR" \
-#         --mode             classil_tcp \
-#         --result_csv       "$LOG_DIR/tta_v3_results_re_classil_tcp.csv" \
-#         --tta_stats_csv    "$LOG_DIR/tta_v3_stats_re_classil_tcp.csv"
+#         --mode             classil_naive \
+#         --result_csv       "$LOG_DIR/tta_v3_results_re_classil_naive.csv"
 
-# ── CLASS-IL Naive — Reverse ──────────────────────────────────────────────────
-run_to_logs \
-    "$LOG_DIR/test_new_run/result_tta_v3_re_classil_naive.log" \
-    "$LOG_DIR/test_new_run/error_tta_v3_re_classil_naive.log" \
-    "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
-        --entrypoint       test_tta_v3.py \
-        --config           "$CONFIG" \
-        --save_dir         "$FINETUNED_DIR" \
-        --merge_model_path "$MERGED_DIR" \
-        --swag_dir         "$SWAG_DIR" \
-        --mode             classil_naive \
-        --result_csv       "$LOG_DIR/tta_v3_results_re_classil_naive.csv"
-
-# ── TASK-IL — Reverse ─────────────────────────────────────────────────────────
-run_to_logs \
-    "$LOG_DIR/test_taskIL/result_tta_v3_re_taskil.log" \
-    "$LOG_DIR/test_taskIL/error_tta_v3_re_taskil.log" \
-    "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
-        --entrypoint       test_tta_v3.py \
-        --config           "$CONFIG" \
-        --save_dir         "$FINETUNED_DIR" \
-        --merge_model_path "$MERGED_DIR" \
-        --swag_dir         "$SWAG_DIR" \
-        --mode             taskil \
-        --result_csv       "$LOG_DIR/tta_v3_results_re_taskil.csv"
+# # ── TASK-IL — Reverse ─────────────────────────────────────────────────────────
+# run_to_logs \
+#     "$LOG_DIR/test_taskIL/result_tta_v3_re_taskil.log" \
+#     "$LOG_DIR/test_taskIL/error_tta_v3_re_taskil.log" \
+#     "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
+#         --entrypoint       test_tta_v3.py \
+#         --config           "$CONFIG" \
+#         --save_dir         "$FINETUNED_DIR" \
+#         --merge_model_path "$MERGED_DIR" \
+#         --swag_dir         "$SWAG_DIR" \
+#         --mode             taskil \
+#         --result_csv       "$LOG_DIR/tta_v3_results_re_taskil.csv"
 
 echo "[INFO] finished at $(date)"

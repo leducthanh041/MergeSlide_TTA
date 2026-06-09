@@ -54,40 +54,26 @@ paths:
 # TTA Hyperparameters
 # ─────────────────────────────────────────────
 tta:
-  # Module A — WSI Bag Augmentation (Frozen-to-Paraffin)
-  K: 8              # số augmented views cho teacher
-  r_patch: 0.75     # fraction của K_PATCHES mỗi augmentation
-
-  # Module B — DaPC Pseudo-label Correction
-  tau_ap_ind: 0.92  # anchor confidence threshold — IND regime
-  tau_ap_ood: 0.70  # anchor confidence threshold — OOD regime
-  beta_ind: 1.2     # DaPC sensitivity — IND
-  beta_ood: 1.5     # DaPC sensitivity — OOD
-
-  # Module C — PETAL Loss
-  spw: 1.0e-6       # Bayesian regularizer weight
-  lam_ce: 1.0       # CE weight trong L_PETAL
-  gamma_class: 1.0  # L_class weight
-  tau_c: 0.07       # temperature scaling cho L_class
-
-  # Module D — FIM Restoration
-  delta: 0.03       # quantile: reset bottom 3% FIM params về anchor
-
-  # Module E — Adaptive LR
-  eta_base: 1.0e-4  # base learning rate
-  tau_ood: 0.5      # sigmoid midpoint cho OOD score
-
-  # EMA
-  ema_alpha: 0.999  # teacher EMA momentum
-
-  # Phase 7 — TCP Confidence Gate
-  tau_task: 0.70    # min TCP confidence để dùng routing (fallback nếu thấp hơn)
-
+  K: 8
+  r_patch: 0.75
+  tau_ap_ind: 0.92
+  tau_ap_ood: 0.70
+  beta_ind: 1.2
+  beta_ood: 1.5
+  spw: 1.0e-6
+  lam_ce: 1.0
+  gamma_class: 1.0
+  tau_c: 0.07
+  delta: 0.03
+  eta_base: 1.0e-4
+  tau_ood: 0.5
+  ema_alpha: 0.999
+  tau_task: 0.8
   # SWAG posterior estimation
   swag_epochs: 10
   swag_lr: 1.0e-4
 
   gamma_task: 0.5          # weight L_task
-  margin_task: 0.1         # margin m cho L_task
-  alpha_task_prompt: 0.999 # EMA momentum task prompt
-  delta_margin: 0.10       # confidence gate (OOD dùng 0.15)
+  margin_task: 1.0         # margin m cho L_task
+  alpha_task_prompt: 0.99 # EMA momentum task prompt
+  delta_margin: 0.3       # confidence gate (OOD dùng 0.15)

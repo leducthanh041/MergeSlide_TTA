@@ -435,6 +435,87 @@ def load_trial_result_row(result_csv: Path) -> dict | None:
     return row
 
 
+def _finite_or_none(value):
+    """Return a JSON-safe scalar: convert NaN/Inf float values to None."""
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
+
+
+def _json_safe(obj):
+    """Recursively make objects strict-JSON compatible."""
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    return _finite_or_none(obj)
+
+
+def _sum_elapsed_from_result_csv(result_csv: Path) -> float | None:
+    """Estimate cached trial elapsed time by summing per-row elapsed_s."""
+    if not result_csv.exists():
+        return None
+    total = 0.0
+    found = False
+    try:
+        with open(result_csv, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                raw = row.get("elapsed_s")
+                if raw in ("", None):
+                    continue
+                try:
+                    value = float(raw)
+                except ValueError:
+                    continue
+                if np.isfinite(value):
+                    total += value
+                    found = True
+    except Exception:
+        return None
+    return total if found else None
+
+
+def build_cached_trial_result(
+    trial_id: int,
+    params: dict,
+    setting: str,
+    phase: str,
+    trial_dir: Path,
+    result_csv: Path,
+) -> dict:
+    """Rebuild tuner-summary row for a cached trial from stdout.log."""
+    stdout_path = trial_dir / "stdout.log"
+    stderr_path = trial_dir / "stderr.log"
+    stdout = stdout_path.read_text(errors="replace") if stdout_path.exists() else ""
+    stderr = stderr_path.read_text(errors="replace") if stderr_path.exists() else ""
+
+    bacc = parse_bacc_from_output(stdout)
+    task_baccs = parse_bacc_per_task(stdout)
+    routing_acc = parse_routing_acc_from_output(stdout)
+    task_routing = parse_routing_acc_per_task(stdout)
+    primary_metric = routing_acc if phase == "routing" else bacc
+    status = "ok" if primary_metric is not None else "failed"
+    elapsed = _sum_elapsed_from_result_csv(result_csv)
+
+    return {
+        "trial_id": trial_id,
+        "setting": setting,
+        "phase": phase,
+        "status": status,
+        "bacc_mean": bacc if bacc is not None else float("nan"),
+        "routing_acc": routing_acc if routing_acc is not None else float("nan"),
+        "elapsed_s": elapsed if elapsed is not None else None,
+        "returncode": 0 if status == "ok" else 1,
+        **{f"task_{t}_bacc": task_baccs.get(t, float("nan")) for t in range(6)},
+        **{f"task_{t}_routing_acc": task_routing.get(t, float("nan")) for t in range(6)},
+        **params,
+        "cached_result_csv": str(result_csv),
+        "cached_stdout": str(stdout_path),
+        "cached_stderr_tail": stderr[-400:] if status != "ok" else "",
+    }
+
+
 def run_command_streaming(
     cmd: list[str],
     cwd: str,
@@ -505,6 +586,13 @@ def collect_worker_summaries(root_output_dir: Path) -> list[dict]:
         root_output_dir.glob("*/summary_*.csv"),
         key=lambda p: p.stat().st_mtime,
     )
+    if not summary_files:
+        # Worker outputs are usually <phase_root>/<worker>/<setting>/summary_*.csv,
+        # while summarize writes artifacts to <phase_root>/<setting>/.
+        summary_files = sorted(
+            root_output_dir.parent.glob(f"*/{root_output_dir.name}/summary_*.csv"),
+            key=lambda p: p.stat().st_mtime,
+        )
     if not summary_files:
         raise FileNotFoundError(
             f"No worker summary files found under {root_output_dir}"
@@ -588,7 +676,7 @@ def write_best_trial_artifacts(rows: list[dict], out_dir: Path, phase: str, top_
     best_json = out_dir / "best_trial.json"
     best_json.parent.mkdir(parents=True, exist_ok=True)
     with open(best_json, "w") as f:
-        json.dump(best, f, indent=2)
+        json.dump(_json_safe(best), f, indent=2, allow_nan=False)
 
     top_rows = ranked[:top_k]
     top_csv = out_dir / "top_k.csv"
@@ -596,7 +684,7 @@ def write_best_trial_artifacts(rows: list[dict], out_dir: Path, phase: str, top_
     with open(top_csv, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(top_rows)
+        writer.writerows([_json_safe(row) for row in top_rows])
 
     print(f"[TTA Tuning] best trial ({metric_key}) → {best_json}")
     print(f"[TTA Tuning] top-{len(top_rows)} trials ({metric_key}) → {top_csv}")
@@ -708,7 +796,7 @@ def main() -> None:
         write_combined_summary(combined_rows, combined_csv)
         write_best_trial_artifacts(combined_rows, output_dir, phase=args.phase, top_k=5)
         print(f"[TTA Tuning] combined summary → {combined_csv}")
-        print_best(combined_rows, n=10)
+        print_best(combined_rows, n=10, phase=args.phase)
         return
 
     if args.prepare_manifest:
@@ -743,17 +831,23 @@ def main() -> None:
 
         if has_cached_trial_result(result_csv):
             print(f"[Trial {trial_id:04d}] SKIP cached result → {result_csv}")
-            cached_row = load_trial_result_row(result_csv)
-            if cached_row is not None:
-                all_results.append(cached_row)
-                if fieldnames is None:
-                    fieldnames = list(cached_row.keys())
-                write_header = not summary_csv.exists()
-                with open(summary_csv, "a", newline="") as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    if write_header:
-                        writer.writeheader()
-                    writer.writerow(cached_row)
+            cached_row = build_cached_trial_result(
+                trial_id=trial_id,
+                params=params,
+                setting=args.setting,
+                phase=args.phase,
+                trial_dir=trial_dir,
+                result_csv=result_csv,
+            )
+            all_results.append(cached_row)
+            if fieldnames is None:
+                fieldnames = list(cached_row.keys())
+            write_header = not summary_csv.exists()
+            with open(summary_csv, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                if write_header:
+                    writer.writeheader()
+                writer.writerow(cached_row)
             continue
 
         result = run_one_trial(
