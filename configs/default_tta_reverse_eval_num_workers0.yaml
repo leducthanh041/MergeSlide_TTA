@@ -65,7 +65,12 @@ tta:
   eta_base: 1.0e-4
   tau_ood: 0.5
   ema_alpha: 0.999
-  tau_task: 0.70
+  tau_task: 0.8
   # SWAG posterior estimation
   swag_epochs: 10
   swag_lr: 1.0e-4
+
+  gamma_task: 0.5          # weight L_task
+  margin_task: 1.0         # margin m cho L_task
+  alpha_task_prompt: 0.99 # EMA momentum task prompt
+  delta_margin: 0.3       # confidence gate (OOD dùng 0.15)

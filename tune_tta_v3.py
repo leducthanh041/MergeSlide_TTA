@@ -1,5 +1,9 @@
 """
-tune_tta.py — Random Search hyperparameter tuning cho MergeSlide-TTA.
+tune_tta_v3.py — Random Search hyperparameter tuning cho MergeSlide-TTA v3.
+
+Hai phase tuning:
+  Phase 1 (routing): maximize routing_acc — tune margin_task, gamma_task, delta_margin, alpha_task_prompt, tau_task
+  Phase 2 (class):   maximize bACC        — tune eta_base, delta, tau_c, gamma_class
 
 Cơ chế: mỗi trial tạo một yaml config tạm (copy từ base config, override
 section tta), truyền thẳng vào --config của test_tta.py.
@@ -46,16 +50,31 @@ import yaml
 # Search space — tham số quan trọng bậc 1 và bậc 2
 # ──────────────────────────────────────────────────────────────────────────────
 
-SEARCH_SPACE: dict[str, list] = {
-    # Bậc 1 — eta_base và delta phải tune cùng nhau
-    "eta_base": [1e-5, 5e-5, 1e-4, 3e-4, 5e-4],
-    "delta":    [0.01, 0.03, 0.05, 0.10, 0.20],
+# Search space theo phase:
+#   phase="routing" → SEARCH_SPACE_ROUTING
+#   phase="class"   → SEARCH_SPACE_CLASS
+SEARCH_SPACE_ROUTING: dict[str, list] = {
+    # Primary: L_task margin và weight
+    "margin_task":        [0.5, 1.0, 2.0, 3.0, 5.0],
+    "gamma_task":         [0.5, 1.0, 2.0, 3.0],
+    # Task prompt EMA gate
+    "delta_margin":       [0.05, 0.10, 0.15, 0.20, 0.30],
+    "alpha_task_prompt":  [0.99, 0.995, 0.999],
+    # TCP inference gate
+    "tau_task":           [0.50, 0.60, 0.70, 0.80],
+}
 
-    # Bậc 2
+SEARCH_SPACE_CLASS: dict[str, list] = {
+    # Giữ nguyên từ tune_tta.py gốc — tune sau khi routing params đã fixed
+    "eta_base":    [1e-5, 5e-5, 1e-4, 3e-4, 5e-4],
+    "delta":       [0.01, 0.03, 0.05, 0.10, 0.20],
     "tau_c":       [0.05, 0.07, 0.10, 0.20, 0.30],
     "tau_ood":     [0.20, 0.30, 0.50, 0.70],
     "gamma_class": [0.5,  1.0,  2.0],
 }
+
+# Được set tại runtime theo --phase argument
+SEARCH_SPACE: dict[str, list] = SEARCH_SPACE_ROUTING  # default
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -183,11 +202,48 @@ def parse_bacc_per_task(stdout: str) -> dict[int, float]:
                 break
     return task_baccs
 
+def parse_routing_acc_from_output(stdout: str) -> float | None:
+    """
+    Parse mean routing accuracy từ dòng:
+    "Routing Accuracy (mean): XX.XXXX% (XX.XXXX%)"
+    Trả về float (0–100) hoặc None nếu không tìm thấy.
+    """
+    for line in stdout.splitlines():
+        if "Routing Accuracy (mean):" in line:
+            try:
+                part = line.split("Routing Accuracy (mean):")[1].strip()
+                mean_str = part.split("%")[0].strip()
+                return float(mean_str)
+            except (IndexError, ValueError):
+                continue
+    return None
+
+
+def parse_routing_acc_per_task(stdout: str) -> dict[int, float]:
+    """
+    Parse routing accuracy per task từ dòng:
+    "  Routing Task X: XX.XXXX% (XX.XXXX%)"
+    """
+    task_raccs: dict[int, float] = {}
+    for line in stdout.splitlines():
+        s = line.strip()
+        if s.startswith("Routing Task "):
+            try:
+                task_id  = int(s.split(":")[0].replace("Routing Task", "").strip())
+                val_str  = s.split(":")[1].strip().split("%")[0].strip()
+                task_raccs[task_id] = float(val_str)
+            except (IndexError, ValueError):
+                continue
+    return task_raccs
+
+
+
 
 def run_one_trial(
     trial_id:        int,
     params:          dict,
     setting:         str,
+    phase:           str,
     base_config:     str,
     merge_dir:       str,
     swag_dir:        str,
@@ -220,7 +276,7 @@ def run_one_trial(
     if entrypoint_wrapper:
         cmd = [
             python_bin, "-u", entrypoint_wrapper,
-            "--entrypoint",       "test_tta.py",
+            "--entrypoint",       "test_tta_v3.py",
             "--config",           trial_config_path,
             "--save_dir",         finetuned_dir,
             "--merge_model_path", merge_dir,
@@ -232,7 +288,7 @@ def run_one_trial(
         ]
     else:
         cmd = [
-            python_bin, "-u", "test_tta.py",
+            python_bin, "-u", "test_tta_v3.py",
             "--config",           trial_config_path,
             "--save_dir",         finetuned_dir,
             "--merge_model_path", merge_dir,
@@ -275,23 +331,37 @@ def run_one_trial(
     elapsed = time.time() - t0
 
     # 6. Parse kết quả
-    bacc       = parse_bacc_from_output(stdout)
-    task_baccs = parse_bacc_per_task(stdout)
-    status     = "ok" if returncode == 0 and bacc is not None else "failed"
+    bacc          = parse_bacc_from_output(stdout)
+    task_baccs    = parse_bacc_per_task(stdout)
+    routing_acc   = parse_routing_acc_from_output(stdout)
+    task_routing  = parse_routing_acc_per_task(stdout)
+
+    # Objective phụ thuộc vào phase
+    if phase == "routing":
+        primary_metric = routing_acc
+        primary_label  = "routing_acc"
+    else:
+        primary_metric = bacc
+        primary_label  = "bACC"
+
+    status = "ok" if returncode == 0 and primary_metric is not None else "failed"
 
     result = {
-        "trial_id":   trial_id,
-        "setting":    setting,
-        "status":     status,
-        "bacc_mean":  bacc if bacc is not None else float("nan"),
-        "elapsed_s":  elapsed,
-        "returncode": returncode,
-        **{f"task_{t}_bacc": task_baccs.get(t, float("nan")) for t in range(6)},
+        "trial_id":      trial_id,
+        "setting":       setting,
+        "phase":         phase,
+        "status":        status,
+        "bacc_mean":     bacc         if bacc         is not None else float("nan"),
+        "routing_acc":   routing_acc  if routing_acc  is not None else float("nan"),
+        "elapsed_s":     elapsed,
+        "returncode":    returncode,
+        **{f"task_{t}_bacc":         task_baccs.get(t,   float("nan")) for t in range(6)},
+        **{f"task_{t}_routing_acc":  task_routing.get(t, float("nan")) for t in range(6)},
         **params,
     }
 
-    if bacc is not None:
-        print(f"[Trial {trial_id:04d}] → bACC = {bacc:.4f}%  ({elapsed/60:.1f} min)")
+    if primary_metric is not None:
+        print(f"[Trial {trial_id:04d}] → {primary_label} = {primary_metric:.4f}%  ({elapsed/60:.1f} min)")
     else:
         print(f"[Trial {trial_id:04d}] → FAILED (rc={returncode})")
         print(f"  stderr: {stderr[-400:]}")
@@ -339,7 +409,7 @@ def load_trial_result_row(result_csv: Path) -> dict | None:
                 row[key] = int(float(row[key]))
             except ValueError:
                 pass
-    for key in ("bacc_mean", "elapsed_s"):
+    for key in ("bacc_mean", "routing_acc", "elapsed_s"):
         if key in row and row[key] not in ("", None):
             try:
                 row[key] = float(row[key])
@@ -357,12 +427,93 @@ def load_trial_result_row(result_csv: Path) -> dict | None:
             except ValueError:
                 pass
     for key in list(row.keys()):
-        if key.startswith("task_") and key.endswith("_bacc") and row[key] not in ("", None):
+        if key.startswith("task_") and (key.endswith("_bacc") or key.endswith("_routing_acc")) and row[key] not in ("", None):
             try:
                 row[key] = float(row[key])
             except ValueError:
                 pass
     return row
+
+
+def _finite_or_none(value):
+    """Return a JSON-safe scalar: convert NaN/Inf float values to None."""
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
+
+
+def _json_safe(obj):
+    """Recursively make objects strict-JSON compatible."""
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    return _finite_or_none(obj)
+
+
+def _sum_elapsed_from_result_csv(result_csv: Path) -> float | None:
+    """Estimate cached trial elapsed time by summing per-row elapsed_s."""
+    if not result_csv.exists():
+        return None
+    total = 0.0
+    found = False
+    try:
+        with open(result_csv, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                raw = row.get("elapsed_s")
+                if raw in ("", None):
+                    continue
+                try:
+                    value = float(raw)
+                except ValueError:
+                    continue
+                if np.isfinite(value):
+                    total += value
+                    found = True
+    except Exception:
+        return None
+    return total if found else None
+
+
+def build_cached_trial_result(
+    trial_id: int,
+    params: dict,
+    setting: str,
+    phase: str,
+    trial_dir: Path,
+    result_csv: Path,
+) -> dict:
+    """Rebuild tuner-summary row for a cached trial from stdout.log."""
+    stdout_path = trial_dir / "stdout.log"
+    stderr_path = trial_dir / "stderr.log"
+    stdout = stdout_path.read_text(errors="replace") if stdout_path.exists() else ""
+    stderr = stderr_path.read_text(errors="replace") if stderr_path.exists() else ""
+
+    bacc = parse_bacc_from_output(stdout)
+    task_baccs = parse_bacc_per_task(stdout)
+    routing_acc = parse_routing_acc_from_output(stdout)
+    task_routing = parse_routing_acc_per_task(stdout)
+    primary_metric = routing_acc if phase == "routing" else bacc
+    status = "ok" if primary_metric is not None else "failed"
+    elapsed = _sum_elapsed_from_result_csv(result_csv)
+
+    return {
+        "trial_id": trial_id,
+        "setting": setting,
+        "phase": phase,
+        "status": status,
+        "bacc_mean": bacc if bacc is not None else float("nan"),
+        "routing_acc": routing_acc if routing_acc is not None else float("nan"),
+        "elapsed_s": elapsed if elapsed is not None else None,
+        "returncode": 0 if status == "ok" else 1,
+        **{f"task_{t}_bacc": task_baccs.get(t, float("nan")) for t in range(6)},
+        **{f"task_{t}_routing_acc": task_routing.get(t, float("nan")) for t in range(6)},
+        **params,
+        "cached_result_csv": str(result_csv),
+        "cached_stdout": str(stdout_path),
+        "cached_stderr_tail": stderr[-400:] if status != "ok" else "",
+    }
 
 
 def run_command_streaming(
@@ -436,6 +587,13 @@ def collect_worker_summaries(root_output_dir: Path) -> list[dict]:
         key=lambda p: p.stat().st_mtime,
     )
     if not summary_files:
+        # Worker outputs are usually <phase_root>/<worker>/<setting>/summary_*.csv,
+        # while summarize writes artifacts to <phase_root>/<setting>/.
+        summary_files = sorted(
+            root_output_dir.parent.glob(f"*/{root_output_dir.name}/summary_*.csv"),
+            key=lambda p: p.stat().st_mtime,
+        )
+    if not summary_files:
         raise FileNotFoundError(
             f"No worker summary files found under {root_output_dir}"
         )
@@ -453,7 +611,7 @@ def collect_worker_summaries(root_output_dir: Path) -> list[dict]:
                 except (TypeError, ValueError):
                     continue
                 row["trial_id"] = trial_id
-                for key in ("bacc_mean", "elapsed_s"):
+                for key in ("bacc_mean", "routing_acc", "elapsed_s"):
                     if key in row and row[key] not in ("", None):
                         try:
                             row[key] = float(row[key])
@@ -471,7 +629,7 @@ def collect_worker_summaries(root_output_dir: Path) -> list[dict]:
                         except ValueError:
                             pass
                 for key in row:
-                    if key.startswith("task_") and key.endswith("_bacc") and row[key] not in ("", None):
+                    if key.startswith("task_") and (key.endswith("_bacc") or key.endswith("_routing_acc")) and row[key] not in ("", None):
                         try:
                             row[key] = float(row[key])
                         except ValueError:
@@ -498,26 +656,27 @@ def write_combined_summary(rows: list[dict], out_csv: Path) -> None:
         writer.writerows(rows)
 
 
-def _row_bacc(row: dict) -> float:
+def _row_metric(row: dict, metric_key: str) -> float:
     try:
-        return float(row.get("bacc_mean", float("nan")))
+        return float(row.get(metric_key, float("nan")))
     except (TypeError, ValueError):
         return float("nan")
 
 
-def write_best_trial_artifacts(rows: list[dict], out_dir: Path, top_k: int = 5) -> None:
+def write_best_trial_artifacts(rows: list[dict], out_dir: Path, phase: str, top_k: int = 5) -> None:
     """Write best_trial.json and top_k.csv from merged summary rows."""
-    valid = [r for r in rows if not np.isnan(_row_bacc(r))]
+    metric_key = "routing_acc" if phase == "routing" else "bacc_mean"
+    valid = [r for r in rows if not np.isnan(_row_metric(r, metric_key))]
     if not valid:
         raise ValueError("No valid trials found for best-trial artifacts.")
 
-    ranked = sorted(valid, key=_row_bacc, reverse=True)
+    ranked = sorted(valid, key=lambda r: _row_metric(r, metric_key), reverse=True)
     best = ranked[0]
 
     best_json = out_dir / "best_trial.json"
     best_json.parent.mkdir(parents=True, exist_ok=True)
     with open(best_json, "w") as f:
-        json.dump(best, f, indent=2)
+        json.dump(_json_safe(best), f, indent=2, allow_nan=False)
 
     top_rows = ranked[:top_k]
     top_csv = out_dir / "top_k.csv"
@@ -525,24 +684,30 @@ def write_best_trial_artifacts(rows: list[dict], out_dir: Path, top_k: int = 5) 
     with open(top_csv, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(top_rows)
+        writer.writerows([_json_safe(row) for row in top_rows])
 
-    print(f"[TTA Tuning] best trial → {best_json}")
-    print(f"[TTA Tuning] top-{len(top_rows)} trials → {top_csv}")
+    print(f"[TTA Tuning] best trial ({metric_key}) → {best_json}")
+    print(f"[TTA Tuning] top-{len(top_rows)} trials ({metric_key}) → {top_csv}")
 
 
-def print_best(results: list[dict], n: int = 5) -> None:
-    valid = [r for r in results if not np.isnan(r["bacc_mean"])]
+def print_best(results: list[dict], n: int = 5, phase: str = "routing") -> None:
+    if phase == "routing":
+        metric_key = "routing_acc"
+        metric_label = "routing_acc"
+    else:
+        metric_key = "bacc_mean"
+        metric_label = "bACC"
+    valid = [r for r in results if not np.isnan(float(r.get(metric_key, float("nan"))))]
     if not valid:
         print("  Chưa có trial thành công.")
         return
-    top = sorted(valid, key=lambda r: r["bacc_mean"], reverse=True)[:n]
+    top = sorted(valid, key=lambda r: float(r.get(metric_key, 0.0)), reverse=True)[:n]
     print(f"\n{'─'*60}")
-    print(f"TOP {min(n, len(top))} TRIALS:")
+    print(f"TOP {min(n, len(top))} TRIALS  (phase={phase}, objective={metric_label}):")
     for i, r in enumerate(top):
-        print(f"  #{i+1}  bACC={r['bacc_mean']:.4f}%  trial={r['trial_id']:04d}")
+        print(f"  #{i+1}  {metric_label}={float(r.get(metric_key,0)):.4f}%  bACC={float(r.get('bacc_mean',0)):.4f}%  trial={r['trial_id']:04d}")
         for k in SEARCH_SPACE:
-            print(f"       {k:15s} = {r[k]}")
+            print(f"       {k:15s} = {r.get(k, 'N/A')}")
     print(f"{'─'*60}\n")
 
 
@@ -569,6 +734,10 @@ def main() -> None:
     parser.add_argument("--python_bin",     type=str, default=None)
     parser.add_argument("--entrypoint_wrapper", type=str, default=None,
                         help="Optional PT-first wrapper, e.g. tools/run_classil_with_pt_features.py")
+    parser.add_argument("--phase", type=str, default="routing",
+                        choices=["routing", "class"],
+                        help="routing: optimize routing_acc (tune margin_task/gamma_task/...); "
+                             "class: optimize bACC (tune eta_base/delta/tau_c/...)")
     parser.add_argument("--manifest_path",  type=str, default=None,
                         help="Shared manifest JSON path for all trials.")
     parser.add_argument("--prepare_manifest", action="store_true",
@@ -580,6 +749,15 @@ def main() -> None:
     parser.add_argument("--trial_end",      type=int, default=None,
                         help="Exclusive end index for this worker slice.")
     args = parser.parse_args()
+
+    # Set SEARCH_SPACE theo phase
+    global SEARCH_SPACE
+    if args.phase == "routing":
+        SEARCH_SPACE = SEARCH_SPACE_ROUTING
+        print(f"[TTA v3 Tuning] Phase: ROUTING — objective = routing_acc")
+    else:
+        SEARCH_SPACE = SEARCH_SPACE_CLASS
+        print(f"[TTA v3 Tuning] Phase: CLASS — objective = bACC")
 
     # Python binary
     if args.python_bin:
@@ -616,9 +794,9 @@ def main() -> None:
         combined_rows = collect_worker_summaries(output_dir)
         combined_csv = output_dir / "summary_all.csv"
         write_combined_summary(combined_rows, combined_csv)
-        write_best_trial_artifacts(combined_rows, output_dir, top_k=5)
+        write_best_trial_artifacts(combined_rows, output_dir, phase=args.phase, top_k=5)
         print(f"[TTA Tuning] combined summary → {combined_csv}")
-        print_best(combined_rows, n=10)
+        print_best(combined_rows, n=10, phase=args.phase)
         return
 
     if args.prepare_manifest:
@@ -653,23 +831,30 @@ def main() -> None:
 
         if has_cached_trial_result(result_csv):
             print(f"[Trial {trial_id:04d}] SKIP cached result → {result_csv}")
-            cached_row = load_trial_result_row(result_csv)
-            if cached_row is not None:
-                all_results.append(cached_row)
-                if fieldnames is None:
-                    fieldnames = list(cached_row.keys())
-                write_header = not summary_csv.exists()
-                with open(summary_csv, "a", newline="") as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    if write_header:
-                        writer.writeheader()
-                    writer.writerow(cached_row)
+            cached_row = build_cached_trial_result(
+                trial_id=trial_id,
+                params=params,
+                setting=args.setting,
+                phase=args.phase,
+                trial_dir=trial_dir,
+                result_csv=result_csv,
+            )
+            all_results.append(cached_row)
+            if fieldnames is None:
+                fieldnames = list(cached_row.keys())
+            write_header = not summary_csv.exists()
+            with open(summary_csv, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                if write_header:
+                    writer.writeheader()
+                writer.writerow(cached_row)
             continue
 
         result = run_one_trial(
             trial_id       = trial_id,
             params         = params,
             setting        = args.setting,
+            phase          = args.phase,
             base_config    = args.base_config,
             merge_dir      = args.merge_dir,
             swag_dir       = args.swag_dir,
@@ -692,12 +877,12 @@ def main() -> None:
                 writer.writeheader()
             writer.writerow(result)
 
-        print_best(all_results, n=5)
+        print_best(all_results, n=5, phase=args.phase)
 
     print(f"\n{'='*60}")
     print(f"TUNING COMPLETE — {args.n_trials} trials — {args.setting.upper()}")
     print(f"Summary → {summary_csv}")
-    print_best(all_results, n=10)
+    print_best(all_results, n=10, phase=args.phase)
 
 
 if __name__ == "__main__":

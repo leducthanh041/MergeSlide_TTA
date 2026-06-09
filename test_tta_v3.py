@@ -1,8 +1,12 @@
 """
-test_tta.py
-===========
-Test-Time Adaptation evaluation cho MergeSlide.
-Metrics output format khớp với test_classIL_task_prompt.py.
+test_tta_v3.py
+==============
+Test-Time Adaptation evaluation — MergeSlide-TTA v3.
+
+Changes vs. test_tta.py (v2):
+    - Import MergeSlide_TTA_Adapter_v3 và TTAConfig_v3 từ tta_engine_v3
+    - Diagnostics bổ sung: loss_task, task_margin, prompt_updated_rate
+    - Tất cả phần còn lại giữ nguyên hoàn toàn
 
 Modes:
     classil_tcp    : CLASS-IL + TCP Confidence Gate
@@ -10,7 +14,7 @@ Modes:
     taskil         : TASK-IL  (ground-truth task_id provided)
 
 Usage::
-    python test_tta.py \\
+    python test_tta_v3.py \\
         --config   configs/default_tta_eval_num_workers0.yaml \\
         --save_dir checkpoints/finetuned \\
         --merge_model_path checkpoints/merged \\
@@ -47,14 +51,18 @@ from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
 from mergeslide_tta.metrics import pad_numpy_arrays
 from mergeslide_tta.model import build_prompt_classifier
 from mergeslide_tta.swag_diagonal import SWAGDiagonal
-from mergeslide_tta.tta_engine import MergeSlide_TTA_Adapter, TTAConfig
+
+# V3: import engine mới
+from mergeslide_tta.tta_engine_v3 import MergeSlide_TTA_Adapter_v3, TTAConfig_v3
+
 from mergeslide_tta.utils import get_eval_metrics, seed_torch
 
 PROJECT_ROOT  = Path(__file__).resolve().parent
 HOT_DIR_NAMES = {"checkpoints", "checkpoints_ood", "logs", "sqlite"}
 
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Path helpers  (mirror test_classIL_task_prompt.py)
+# Path helpers (giữ nguyên từ test_tta.py)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def get_local_hot_root() -> Path:
@@ -101,7 +109,7 @@ def resolve_hot_path(path: str, local_root: Path) -> Path:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Build MLP weight matrices (classifier-based, handles forward/reverse order)
+# Build MLP weight matrices (giữ nguyên từ test_tta.py)
 # ──────────────────────────────────────────────────────────────────────────────
 
 _CLASSIFIER_RANGE_BY_NAME: dict[str, list[int]] = {
@@ -111,9 +119,6 @@ _CLASSIFIER_RANGE_BY_NAME: dict[str, list[int]] = {
 
 
 def build_per_task_mlp_weights(classifier, task_names, device):
-    """
-    {task_id: (weight [n_cls, 768], bias [n_cls])} — current order, FORWARD classifier.
-    """
     out = {}
     for t, name in enumerate(task_names):
         start, end = _CLASSIFIER_RANGE_BY_NAME[name]
@@ -124,43 +129,35 @@ def build_per_task_mlp_weights(classifier, task_names, device):
 
 
 def build_global_mlp_weights(classifier, task_names, device):
-    """
-    Global [13, 768] weight matrix IN CURRENT ORDER — dùng cho naive mode.
-    Col j = class j trong current-order global space.
-    """
     parts = [
         classifier[:, _CLASSIFIER_RANGE_BY_NAME[n][0]:_CLASSIFIER_RANGE_BY_NAME[n][1] + 1]
         for n in task_names
     ]
-    global_w = torch.cat(parts, dim=1).T.contiguous().to(device)   # [13, 768]
+    global_w = torch.cat(parts, dim=1).T.contiguous().to(device)
     return global_w, torch.zeros(13, device=device)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# One-fold, one-task evaluation loop
+# One-fold, one-task evaluation loop — V3
 # ──────────────────────────────────────────────────────────────────────────────
 
-def eval_task_tta(
+def eval_task_tta_v3(
     test_loader,
     task_id: int,
-    adapter: MergeSlide_TTA_Adapter,
+    adapter: MergeSlide_TTA_Adapter_v3,
     seq_dataset: Sequential_Generic_MIL_Dataset,
     fold_id: int,
-    mode: str,            # "classil_tcp" | "classil_naive" | "taskil"
+    mode: str,
     reset_per_slide: bool,
     device: torch.device,
 ) -> tuple:
     """
-    Adaptive evaluation loop cho một task + fold.
+    Evaluation loop cho một task + fold — v3.
 
-    Cấu trúc preds/targets/probs khớp với eval_task_tcp / eval_task_naive:
-      - classil_tcp / taskil : LOCAL class space, probs [1, n_cls_pred_task]
-      - classil_naive        : GLOBAL class space, probs [1, 13]
-
-    Returns
-    -------
-    (metrics, preds_arr, targets_arr, probs_arr,
-     conv_preds_arr, conv_targets_arr, elapsed, tta_stats_list)
+    Giống eval_task_tta từ test_tta.py, bổ sung tracking:
+      - loss_task per slide
+      - task_margin per slide (gap top1 - top2 task scores)
+      - prompt_updated per slide (bool)
     """
     preds_all:           list[np.ndarray] = []
     targets_all:         list[np.ndarray] = []
@@ -185,7 +182,6 @@ def eval_task_tta(
 
         t0 = time.time()
 
-        # ── Mode dispatch ────────────────────────────────────────────────────
         if mode == "taskil":
             pred_local, pred_task, prob_np, debug = adapter.adapt_and_predict(
                 features, coords, task_id=task_id, use_tcp_gate=False,
@@ -201,24 +197,17 @@ def eval_task_tta(
 
         times.append(time.time() - t0)
 
-        # ── preds / targets / probs ──────────────────────────────────────────
-        # Naive: global space (matching eval_task_naive)
-        # TCP / TASK-IL: local space (matching eval_task_tcp)
         if is_naive:
             g_pred  = seq_dataset.task_to_global_class[pred_task].get(pred_local, -1)
             g_label = seq_dataset.task_to_global_class[task_id].get(label_int, -1)
             preds_all.append(np.array([g_pred]))
             targets_all.append(np.array([g_label]))
-            probs_all.append(prob_np.reshape(1, -1))   # [1, 13]
+            probs_all.append(prob_np.reshape(1, -1))
         else:
             preds_all.append(np.array([pred_local]))
             targets_all.append(np.array([label_int]))
-            probs_all.append(prob_np.reshape(1, -1))   # [1, n_cls_pred_task]
+            probs_all.append(prob_np.reshape(1, -1))
 
-        # ── Global conversion (F1 / Recall / Precision) ─────────────────────
-        # Match test_classIL_task_prompt.py semantics for reported TCP metrics:
-        # TCP maps the predicted local class through the true task_id (legacy
-        # MergeSlide behavior), while naive keeps the global-head prediction.
         g_label = seq_dataset.task_to_global_class[task_id].get(label_int, -1)
         strict_g_pred = seq_dataset.task_to_global_class[pred_task].get(pred_local, -1)
         if mode == "classil_tcp":
@@ -228,7 +217,6 @@ def eval_task_tta(
         convert_preds_all.append(np.array([g_pred]))
         convert_targets_all.append(np.array([g_label]))
 
-        # ── TTA diagnostics ─────────────────────────────────────────────────
         tta_stats_list.append({
             "fold": fold_id, "task_id": task_id, "task_name": task_name,
             "sample_idx": sample_idx, "true_local": label_int,
@@ -240,7 +228,6 @@ def eval_task_tta(
             **debug,
         })
 
-    # ── Pack ─────────────────────────────────────────────────────────────────
     preds_arr   = np.concatenate(preds_all)
     targets_arr = np.concatenate(targets_all)
     try:
@@ -268,7 +255,7 @@ def eval_task_tta(
 if __name__ == "__main__":
     torch.multiprocessing.set_sharing_strategy("file_system")
 
-    parser = argparse.ArgumentParser(description="MergeSlide TTA evaluation")
+    parser = argparse.ArgumentParser(description="MergeSlide TTA v3 evaluation")
     parser.add_argument("--config",            type=str,
                         default="configs/default_tta_eval_num_workers0.yaml")
     parser.add_argument("--save_dir",          type=str, required=True)
@@ -276,10 +263,8 @@ if __name__ == "__main__":
     parser.add_argument("--swag_dir",          type=str, required=True)
     parser.add_argument("--mode",              type=str, default="classil_tcp",
                         choices=["classil_tcp", "classil_naive", "taskil"])
-    parser.add_argument("--no_reset_per_task", action="store_true",
-                        help="Không reset adapter giữa các tasks (default: reset)")
-    parser.add_argument("--episodic",          action="store_true",
-                        help="Reset adapter trước mỗi slide (episodic mode)")
+    parser.add_argument("--no_reset_per_task", action="store_true")
+    parser.add_argument("--episodic",          action="store_true")
     parser.add_argument("--result_csv",        type=str, default="")
     parser.add_argument("--tta_stats_csv",     type=str, default="")
     parser.add_argument("--fold_start",        type=int, default=0)
@@ -298,42 +283,42 @@ if __name__ == "__main__":
     num_folds       = cfg.training.num_folds
     fold_start      = args.fold_start
     fold_end        = args.fold_end or num_folds
-    reset_per_task  = not args.no_reset_per_task   # default True
+    reset_per_task  = not args.no_reset_per_task
     reset_per_slide = args.episodic
 
-    print(f"[INFO] mode={args.mode}  reset_per_task={reset_per_task}  "
-          f"episodic={reset_per_slide}")
+    print(f"[INFO] MergeSlide-TTA v3  mode={args.mode}  "
+          f"reset_per_task={reset_per_task}  episodic={reset_per_slide}")
     print(f"[INFO] folds: {fold_start} → {fold_end}")
     print(f"[INFO] swag_dir: {args.swag_dir}")
 
-    # ── TTA config ───────────────────────────────────────────────────────────
+    # ── TTA v3 config ────────────────────────────────────────────────────────
     raw_tta = OmegaConf.to_container(cfg.get("tta", OmegaConf.create({})), resolve=True)
-    tta_cfg = TTAConfig(**{k: v for k, v in raw_tta.items() if hasattr(TTAConfig, k)})
+    tta_cfg = TTAConfig_v3(**{k: v for k, v in raw_tta.items() if hasattr(TTAConfig_v3, k)})
     tta_cfg.k_patches_std = K_PATCHES
-    print(f"[INFO] TTAConfig: {tta_cfg}")
+    print(f"[INFO] TTAConfig_v3: {tta_cfg}")
 
     # ── Dataset + prompt artifacts ───────────────────────────────────────────
-    seq_dataset  = Sequential_Generic_MIL_Dataset(cfg)
-    num_tasks    = cfg.training.num_tasks
-    num_classes  = seq_dataset.num_classes     # list[int], per task
+    seq_dataset   = Sequential_Generic_MIL_Dataset(cfg)
+    num_tasks     = cfg.training.num_tasks
+    num_classes   = seq_dataset.num_classes
     total_classes = sum(num_classes)
-    order        = getattr(cfg.dataset, "order", "forward")
+    order         = getattr(cfg.dataset, "order", "forward")
 
     print("Building prompt classifier ...")
-    classifier, _ = build_prompt_classifier(str(device))   # [768, 13] FORWARD
+    classifier, _ = build_prompt_classifier(str(device))
 
     task_prompts: torch.Tensor = torch.load(PROJECT_ROOT / "task_prompts.pt").to(device)
     if order == "reverse":
         task_prompts = task_prompts.flip(0)
 
-    per_task_mlp        = build_per_task_mlp_weights(classifier, seq_dataset.task_names, device)
-    global_w, global_b  = build_global_mlp_weights(classifier, seq_dataset.task_names, device)
+    per_task_mlp       = build_per_task_mlp_weights(classifier, seq_dataset.task_names, device)
+    global_w, global_b = build_global_mlp_weights(classifier, seq_dataset.task_names, device)
 
     print("Loading TITAN base model ...")
     base_titan = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
     base_titan = base_titan.to(device).eval()
 
-    # ── Per-fold metric accumulators (mirror test_classIL_task_prompt.py) ───
+    # ── Per-fold accumulators ────────────────────────────────────────────────
     overall_accs:         list[float]       = []
     overall_baccs:        list[float]       = []
     overall_macro_f1s:    list[float]       = []
@@ -343,8 +328,10 @@ if __name__ == "__main__":
     overall_aucs:         list[np.ndarray]  = []
     overall_times:        list[float]       = []
     all_acc_per_task:     list[dict]        = []
-    # TTA-specific diagnostics per fold
     overall_tta_diag:     list[dict]        = []
+    # V3: routing accuracy accumulators
+    overall_routing_acc:           list[float]       = []   # mean across tasks
+    overall_routing_acc_per_task:  list[dict]        = []   # {task_id: float}
 
     all_results:   list[dict] = []
     all_tta_stats: list[dict] = []
@@ -359,11 +346,11 @@ if __name__ == "__main__":
         if not swag_path.exists():
             print(f"[WARN] SWAG not found: {swag_path} — skipping"); continue
 
-        backbone_sd       = torch.load(str(merged_path), map_location="cpu")
-        mean_sd, var_sd   = SWAGDiagonal.load(str(swag_path), device="cpu")
+        backbone_sd     = torch.load(str(merged_path), map_location="cpu")
+        mean_sd, var_sd = SWAGDiagonal.load(str(swag_path), device="cpu")
 
-        print(f"\n[Fold {fold_id}] Building TTA adapter ...")
-        adapter = MergeSlide_TTA_Adapter(
+        print(f"\n[Fold {fold_id}] Building TTA v3 adapter ...")
+        adapter = MergeSlide_TTA_Adapter_v3(
             base_vision_encoder  = base_titan.vision_encoder,
             backbone_sd          = backbone_sd,
             mean_sd              = mean_sd,
@@ -379,7 +366,6 @@ if __name__ == "__main__":
         trainable = sum(p.numel() for p in adapter.student.parameters() if p.requires_grad)
         print(f"[Fold {fold_id}] Trainable LN params: {trainable:,}")
 
-        # Per-fold inner accumulators
         all_accs:   list[float] = []
         all_baccs:  list[float] = []
         all_aucs_fold = np.full(total_classes, np.nan, dtype=float)
@@ -387,11 +373,18 @@ if __name__ == "__main__":
         all_targets_g: list[np.ndarray] = []
         acc_per_task:  dict[int, float] = {}
         fold_time: float = 0.0
+        # V3: routing accuracy per task trong fold này
+        routing_acc_per_task: dict[int, float] = {}
 
-        # Per-fold TTA diagnostic sums
         fold_diag = {
-            "avg_ood_score": [], "avg_tcp_conf": [], "aug_rate": [],
-            "avg_loss_petal": [], "avg_loss_class": [],
+            "avg_ood_score":        [],
+            "avg_tcp_conf":         [],
+            "aug_rate":             [],
+            "avg_loss_petal":       [],
+            "avg_loss_class":       [],
+            "avg_loss_task":        [],    # V3 NEW
+            "avg_task_margin":      [],    # V3 NEW
+            "prompt_updated_rate":  [],    # V3 NEW
         }
 
         for task_id in range(num_tasks):
@@ -404,7 +397,7 @@ if __name__ == "__main__":
             _, _, test_loader = seq_dataset.get_data_loaders(fold_id, task_id)
 
             (metrics, preds_arr, targets_arr, probs_arr,
-             conv_preds, conv_targets, elapsed, tta_stats) = eval_task_tta(
+             conv_preds, conv_targets, elapsed, tta_stats) = eval_task_tta_v3(
                 test_loader     = test_loader,
                 task_id         = task_id,
                 adapter         = adapter,
@@ -426,9 +419,8 @@ if __name__ == "__main__":
             all_preds_g.append(conv_preds)
             all_targets_g.append(conv_targets)
 
-            # ── Per-class AUC (matching original) ───────────────────────────
+            # ── Per-class AUC ────────────────────────────────────────────────
             if args.mode == "classil_naive":
-                # Global class indices for this task
                 global_idxs = sorted(seq_dataset.task_to_global_class[task_id].values())
                 for g_idx in global_idxs:
                     if probs_arr.shape[1] > g_idx:
@@ -439,7 +431,6 @@ if __name__ == "__main__":
                         except ValueError:
                             pass
             else:
-                # Local class indices (matching eval_task_tcp)
                 global_idxs = sorted(seq_dataset.task_to_global_class[task_id].values())
                 for i in range(n_cls):
                     if i < probs_arr.shape[1]:
@@ -450,33 +441,60 @@ if __name__ == "__main__":
                         except ValueError:
                             pass
 
-            # ── TTA diagnostics ─────────────────────────────────────────────
-            ood_scores  = [s["ood_score"]  for s in tta_stats]
-            tcp_confs   = [s["tcp_conf"]   for s in tta_stats]
-            loss_petals = [s["loss_petal"] for s in tta_stats]
-            loss_classes= [s["loss_class"] for s in tta_stats]
-            aug_rate    = sum(s["use_aug"] for s in tta_stats) / max(1, len(tta_stats))
+            # ── TTA diagnostics ──────────────────────────────────────────────
+            ood_scores      = [s["ood_score"]       for s in tta_stats]
+            tcp_confs       = [s["tcp_conf"]        for s in tta_stats]
+            loss_petals     = [s["loss_petal"]      for s in tta_stats]
+            loss_classes    = [s["loss_class"]      for s in tta_stats]
+            loss_tasks      = [s["loss_task"]       for s in tta_stats]   # V3
+            task_margins    = [s["task_margin"]     for s in tta_stats]   # V3
+            prompt_updates  = [s["prompt_updated"]  for s in tta_stats]   # V3
+            aug_rate        = sum(s["use_aug"] for s in tta_stats) / max(1, len(tta_stats))
+            prompt_upd_rate = sum(prompt_updates) / max(1, len(prompt_updates))   # V3
+
+            # V3: routing accuracy cho task này
+            # Chỉ có ý nghĩa với classil_tcp (naive và taskil không dùng routing)
+            if args.mode == "classil_tcp":
+                routing_correct = sum(
+                    1 for s in tta_stats if s["pred_task"] == task_id
+                )
+                task_routing_acc = routing_correct / max(1, len(tta_stats))
+            else:
+                task_routing_acc = float("nan")
+            routing_acc_per_task[task_id] = task_routing_acc
 
             fold_diag["avg_ood_score"].append(np.mean(ood_scores))
             fold_diag["avg_tcp_conf"].append(np.mean(tcp_confs))
             fold_diag["aug_rate"].append(aug_rate)
             fold_diag["avg_loss_petal"].append(np.mean(loss_petals))
             fold_diag["avg_loss_class"].append(np.mean(loss_classes))
+            fold_diag["avg_loss_task"].append(np.mean(loss_tasks))
+            fold_diag["avg_task_margin"].append(np.mean(task_margins))
+            fold_diag["prompt_updated_rate"].append(prompt_upd_rate)
 
             print(
                 f"  [Fold {fold_id}][Task {task_id} {task_name}] "
                 f"ACC={task_acc*100:.4f}%  BAcc={task_bacc*100:.4f}%  "
                 f"OOD={np.mean(ood_scores):.3f}  TCP={np.mean(tcp_confs):.3f}  "
-                f"aug={aug_rate*100:.1f}%  L_petal={np.mean(loss_petals):.4f}"
+                f"L_task={np.mean(loss_tasks):.4f}  "
+                f"margin={np.mean(task_margins):.3f}  "
+                f"prompt_upd={prompt_upd_rate*100:.1f}%  "
+                f"routing_acc={task_routing_acc*100:.1f}%"
             )
 
             all_results.append({
                 "fold": fold_id, "task_id": task_id, "task_name": task_name,
                 "mode": args.mode, "bacc": task_bacc, "acc": task_acc,
                 "n_samples": n_samples, "elapsed_s": elapsed,
-                "avg_ood_score": np.mean(ood_scores), "avg_tcp_conf": np.mean(tcp_confs),
-                "aug_rate": aug_rate, "avg_loss_petal": np.mean(loss_petals),
-                "avg_loss_class": np.mean(loss_classes),
+                "avg_ood_score":        np.mean(ood_scores),
+                "avg_tcp_conf":         np.mean(tcp_confs),
+                "aug_rate":             aug_rate,
+                "avg_loss_petal":       np.mean(loss_petals),
+                "avg_loss_class":       np.mean(loss_classes),
+                "avg_loss_task":        np.mean(loss_tasks),
+                "avg_task_margin":      np.mean(task_margins),
+                "prompt_updated_rate":  prompt_upd_rate,
+                "routing_acc":          task_routing_acc,   # V3
             })
             all_tta_stats.extend(tta_stats)
 
@@ -499,6 +517,10 @@ if __name__ == "__main__":
         overall_times.append(fold_time / num_tasks)
         all_acc_per_task.append(acc_per_task)
         overall_tta_diag.append({k: np.mean(v) for k, v in fold_diag.items()})
+        # V3: routing accuracy
+        valid_routing = [v for v in routing_acc_per_task.values() if not np.isnan(v)]
+        overall_routing_acc.append(np.mean(valid_routing) if valid_routing else float("nan"))
+        overall_routing_acc_per_task.append(routing_acc_per_task)
 
         print(
             f"[Fold {fold_id}] Acc={np.mean(all_accs)*100:.4f}%  "
@@ -506,16 +528,15 @@ if __name__ == "__main__":
             f"MacroF1={fold_macro_f1*100:.4f}%"
         )
 
-    # ── Final summary (format khớp với test_classIL_task_prompt.py) ──────────
+    # ── Final summary ─────────────────────────────────────────────────────────
     mode_label = {"classil_tcp": "TCP", "classil_naive": "Naive", "taskil": "TASK-IL"}[args.mode]
-    print(f"\n===== TTA Class-IL ({mode_label}) Results =====")
+    print(f"\n===== TTA v3 Class-IL ({mode_label}) Results =====")
     print(f"Accuracy:        {np.mean(overall_accs)*100:.4f}% ({np.std(overall_accs)*100:.4f}%)")
     print(f"Balanced Acc:    {np.mean(overall_baccs)*100:.4f}% ({np.std(overall_baccs)*100:.4f}%)")
     print(f"Macro F1:        {np.mean(overall_macro_f1s)*100:.4f}% ({np.std(overall_macro_f1s)*100:.4f}%)")
     print(f"Weighted F1:     {np.mean(overall_weighted_f1s)*100:.4f}% ({np.std(overall_weighted_f1s)*100:.4f}%)")
     print(f"Inference time:  {np.mean(overall_times):.3f}s ({np.std(overall_times):.3f}s)")
 
-    # Recall / Precision / AUC per class
     def _fmt_per_class(arrays: list[np.ndarray], label: str) -> None:
         stacked = np.stack([a for a in arrays if len(a) > 0])
         if np.isnan(stacked).any():
@@ -545,16 +566,39 @@ if __name__ == "__main__":
         s = np.std(accs_by_task[t])
         print(f"  Task {t}: {v*100:.4f}% ({s*100:.4f}%)")
 
-    # TTA-specific diagnostics
-    print("\n===== TTA Diagnostics =====")
-    diag_keys = ["avg_ood_score", "avg_tcp_conf", "aug_rate", "avg_loss_petal", "avg_loss_class"]
+    # V3: routing accuracy summary — primary metric cho routing tune
+    print("\nRouting Accuracy per task (pred_task == true_task):")
+    routing_by_task = {t: [] for t in range(num_tasks)}
+    for fold_r in overall_routing_acc_per_task:
+        for t in range(num_tasks):
+            v = fold_r.get(t, float("nan"))
+            if not np.isnan(v):
+                routing_by_task[t].append(v)
+    for t in range(num_tasks):
+        vals = routing_by_task[t]
+        if vals:
+            print(f"  Routing Task {t}: {np.mean(vals)*100:.4f}% ({np.std(vals)*100:.4f}%)")
+        else:
+            print(f"  Routing Task {t}: N/A (naive/taskil mode)")
+    overall_routing_valid = [v for v in overall_routing_acc if not np.isnan(v)]
+    if overall_routing_valid:
+        print(f"Routing Accuracy (mean): {np.mean(overall_routing_valid)*100:.4f}% "
+              f"({np.std(overall_routing_valid)*100:.4f}%)")
+
+    # V3: diagnostics bổ sung
+    print("\n===== TTA v3 Diagnostics =====")
+    diag_keys = [
+        "avg_ood_score", "avg_tcp_conf", "aug_rate",
+        "avg_loss_petal", "avg_loss_class",
+        "avg_loss_task", "avg_task_margin", "prompt_updated_rate",  # V3
+    ]
     for k in diag_keys:
         vals = [d[k] for d in overall_tta_diag]
-        print(f"  {k:20s}: {np.mean(vals):.4f} (±{np.std(vals):.4f})")
+        print(f"  {k:25s}: {np.mean(vals):.4f} (±{np.std(vals):.4f})")
 
     # ── Save CSVs ─────────────────────────────────────────────────────────────
     if all_results:
-        out_csv = args.result_csv or f"logs/tta_results_{args.mode}.csv"
+        out_csv = args.result_csv or f"logs/tta_v3_results_{args.mode}.csv"
         Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
         with open(out_csv, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(all_results[0].keys()))

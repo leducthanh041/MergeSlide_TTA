@@ -1,10 +1,11 @@
 #!/bin/bash
 #
-# TTA evaluation runner — OOD setting
+# TTA v3 evaluation runner — IND reverse order (C→T→E→N→R→B)
+# Mirror của scripts/test_tta_reverse.sh nhưng dùng test_tta_v3.py
 #
-#SBATCH --job-name=test_tta_ood
-#SBATCH --output=logs/test_tta_ood_%j.out
-#SBATCH --error=logs/test_tta_ood_%j.err
+#SBATCH --job-name=test_tta_v3_reverse
+#SBATCH --output=logs/test_tta_v3_reverse_%j.out
+#SBATCH --error=logs/test_tta_v3_reverse_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
@@ -19,10 +20,10 @@ PROJECT_NAME="$(basename "$PROJECT_ROOT")"
 export MERGESLIDE_LOCAL_ROOT="${MERGESLIDE_LOCAL_ROOT:-/docker/data/$USER_NAME/$PROJECT_NAME}"
 LOG_DIR="${LOG_DIR:-logs}"
 
-CONFIG="${CONFIG:-configs/default_tta_ood_eval_num_workers0.yaml}"
-FINETUNED_DIR="${FINETUNED_DIR:-./checkpoints_ood/finetuned}"
-MERGED_DIR="${MERGED_DIR:-./checkpoints_ood/merged}"
-SWAG_DIR="${SWAG_DIR:-/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/checkpoints_ood/swag_diagonal}"
+CONFIG="${CONFIG:-configs/default_tta_reverse_eval_num_workers0.yaml}"
+FINETUNED_DIR="${FINETUNED_DIR:-./checkpoints/finetuned_reverse}"
+MERGED_DIR="${MERGED_DIR:-./checkpoints/merged_reverse}"
+SWAG_DIR="${SWAG_DIR:-/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/checkpoints/swag_diagonal_reverse}"
 
 if [ -z "${PYTHON_BIN:-}" ]; then
     DEFAULT_PYTHON="/mmlab_students/storageStudents/nguyenvd/anaconda3/envs/mergePre/bin/python3.10"
@@ -42,7 +43,8 @@ export TMPDIR="${TMPDIR:-$MERGESLIDE_LOCAL_ROOT/tmp}"
 export SQLITE_TMPDIR="${SQLITE_TMPDIR:-$MERGESLIDE_LOCAL_ROOT/sqlite}"
 export HDF5_USE_FILE_LOCKING="${HDF5_USE_FILE_LOCKING:-FALSE}"
 
-echo "[INFO] start at $(date) — OOD TTA"
+echo "[INFO] start at $(date) — REVERSE TTA v3"
+echo "[INFO] SWAG_DIR=$SWAG_DIR"
 
 check_log_not_held() {
     local log_path="$1"
@@ -68,44 +70,44 @@ run_to_logs() {
     "$@" >> "$result_log" 2>> "$error_log"
 }
 
-# ── CLASS-IL TCP — OOD ────────────────────────────────────────────────────────
+# ── CLASS-IL TCP — Reverse ────────────────────────────────────────────────────
 run_to_logs \
-    "$LOG_DIR/test_new_run/result_tta_ood_classil_tcp.log" \
-    "$LOG_DIR/test_new_run/error_tta_ood_classil_tcp.log" \
+    "$LOG_DIR/test_new_run/result_tta_v3_re_classil_tcp.log" \
+    "$LOG_DIR/test_new_run/error_tta_v3_re_classil_tcp.log" \
     "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
-        --entrypoint       test_tta.py \
+        --entrypoint       test_tta_v3.py \
         --config           "$CONFIG" \
         --save_dir         "$FINETUNED_DIR" \
         --merge_model_path "$MERGED_DIR" \
         --swag_dir         "$SWAG_DIR" \
         --mode             classil_tcp \
-        --result_csv       "$LOG_DIR/tta_results_ood_classil_tcp.csv" \
-        --tta_stats_csv    "$LOG_DIR/tta_stats_ood_classil_tcp.csv"
+        --result_csv       "$LOG_DIR/tta_v3_results_re_classil_tcp.csv" \
+        --tta_stats_csv    "$LOG_DIR/tta_v3_stats_re_classil_tcp.csv"
 
-# # ── CLASS-IL Naive — OOD ──────────────────────────────────────────────────────
+# # ── CLASS-IL Naive — Reverse ──────────────────────────────────────────────────
 # run_to_logs \
-#     "$LOG_DIR/test_new_run/result_tta_ood_classil_naive.log" \
-#     "$LOG_DIR/test_new_run/error_tta_ood_classil_naive.log" \
+#     "$LOG_DIR/test_new_run/result_tta_v3_re_classil_naive.log" \
+#     "$LOG_DIR/test_new_run/error_tta_v3_re_classil_naive.log" \
 #     "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
-#         --entrypoint       test_tta.py \
+#         --entrypoint       test_tta_v3.py \
 #         --config           "$CONFIG" \
 #         --save_dir         "$FINETUNED_DIR" \
 #         --merge_model_path "$MERGED_DIR" \
 #         --swag_dir         "$SWAG_DIR" \
 #         --mode             classil_naive \
-#         --result_csv       "$LOG_DIR/tta_results_ood_classil_naive.csv"
+#         --result_csv       "$LOG_DIR/tta_v3_results_re_classil_naive.csv"
 
-# # ── TASK-IL — OOD ─────────────────────────────────────────────────────────────
+# # ── TASK-IL — Reverse ─────────────────────────────────────────────────────────
 # run_to_logs \
-#     "$LOG_DIR/test_taskIL/result_tta_ood_taskil.log" \
-#     "$LOG_DIR/test_taskIL/error_tta_ood_taskil.log" \
+#     "$LOG_DIR/test_taskIL/result_tta_v3_re_taskil.log" \
+#     "$LOG_DIR/test_taskIL/error_tta_v3_re_taskil.log" \
 #     "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
-#         --entrypoint       test_tta.py \
+#         --entrypoint       test_tta_v3.py \
 #         --config           "$CONFIG" \
 #         --save_dir         "$FINETUNED_DIR" \
 #         --merge_model_path "$MERGED_DIR" \
 #         --swag_dir         "$SWAG_DIR" \
 #         --mode             taskil \
-#         --result_csv       "$LOG_DIR/tta_results_ood_taskil.csv"
+#         --result_csv       "$LOG_DIR/tta_v3_results_re_taskil.csv"
 
 echo "[INFO] finished at $(date)"
