@@ -63,10 +63,10 @@ tta:
   spw: 1.0e-6
   lam_ce: 1.0
   gamma_class: 1.0
-  tau_c: 0.07
-  delta: 0.03
-  eta_base: 1.0e-4
-  tau_ood: 0.5
+  tau_c: 0.3
+  delta: 0.1
+  eta_base: 0.0005
+  tau_ood: 0.7
   ema_alpha: 0.999
   tau_task: 0.8
   # SWAG posterior estimation

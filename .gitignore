@@ -42,6 +42,7 @@ notebooks/.ipynb_checkpoints/
 /runs/
 /outputs/
 /wandb/
+/ablation/
 
 # ---------------------------------------------------------------------------
 # Model artifacts and experiment outputs
