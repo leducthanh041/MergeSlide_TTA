@@ -24,6 +24,22 @@ CONFIG="${CONFIG:-configs/default_tta_ood_eval_num_workers0.yaml}"
 FINETUNED_DIR="${FINETUNED_DIR:-./checkpoints_ood/finetuned}"
 MERGED_DIR="${MERGED_DIR:-./checkpoints_ood/merged}"
 SWAG_DIR="${SWAG_DIR:-/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/checkpoints_ood/swag_diagonal}"
+EPISODIC="${EPISODIC:-1}"
+# EPISODIC controls task-level reset behavior:
+#   EPISODIC=1 -> reset to source before each new task (default test_tta_v3.py behavior)
+#   EPISODIC=0 -> keep the adapted model across tasks via --no_reset_per_task
+TTA_RESET_ARGS=()
+case "${EPISODIC,,}" in
+    1|true|yes|y|on)
+        ;;
+    0|false|no|n|off)
+        TTA_RESET_ARGS+=(--no_reset_per_task)
+        ;;
+    *)
+        echo "[ERROR] EPISODIC must be one of: 1/0, true/false, yes/no, on/off" >&2
+        exit 1
+        ;;
+esac
 
 if [ -z "${PYTHON_BIN:-}" ]; then
     DEFAULT_PYTHON="/mmlab_students/storageStudents/nguyenvd/anaconda3/envs/mergePre/bin/python3.10"
@@ -45,6 +61,7 @@ export HDF5_USE_FILE_LOCKING="${HDF5_USE_FILE_LOCKING:-FALSE}"
 
 echo "[INFO] start at $(date) — OOD TTA v3"
 echo "[INFO] SWAG_DIR=$SWAG_DIR"
+echo "[INFO] EPISODIC=$EPISODIC  reset_args=${TTA_RESET_ARGS[*]:-(reset_per_task)}"
 
 check_log_not_held() {
     local log_path="$1"
@@ -70,19 +87,20 @@ run_to_logs() {
     "$@" >> "$result_log" 2>> "$error_log"
 }
 
-# # ── CLASS-IL TCP — OOD ────────────────────────────────────────────────────────
-# run_to_logs \
-#     "$LOG_DIR/test_new_run/result_tta_v3_ood_classil_tcp.log" \
-#     "$LOG_DIR/test_new_run/error_tta_v3_ood_classil_tcp.log" \
-#     "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
-#         --entrypoint       test_tta_v3.py \
-#         --config           "$CONFIG" \
-#         --save_dir         "$FINETUNED_DIR" \
-#         --merge_model_path "$MERGED_DIR" \
-#         --swag_dir         "$SWAG_DIR" \
-#         --mode             classil_tcp \
-#         --result_csv       "$LOG_DIR/tta_v3_results_ood_classil_tcp.csv" \
-#         --tta_stats_csv    "$LOG_DIR/tta_v3_stats_ood_classil_tcp.csv"
+# ── CLASS-IL TCP — OOD ────────────────────────────────────────────────────────
+run_to_logs \
+    "$LOG_DIR/test_new_run/result_tta_v3_ood_classil_tcp.log" \
+    "$LOG_DIR/test_new_run/error_tta_v3_ood_classil_tcp.log" \
+    "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
+        --entrypoint       test_tta_v3.py \
+        --config           "$CONFIG" \
+        --save_dir         "$FINETUNED_DIR" \
+        --merge_model_path "$MERGED_DIR" \
+        --swag_dir         "$SWAG_DIR" \
+        --mode             classil_tcp \
+        --result_csv       "$LOG_DIR/tta_v3_results_ood_classil_tcp.csv" \
+        --tta_stats_csv    "$LOG_DIR/tta_v3_stats_ood_classil_tcp.csv" \
+        "${TTA_RESET_ARGS[@]}"
 
 # ── CLASS-IL Naive — OOD ──────────────────────────────────────────────────────
 run_to_logs \
@@ -95,7 +113,8 @@ run_to_logs \
         --merge_model_path "$MERGED_DIR" \
         --swag_dir         "$SWAG_DIR" \
         --mode             classil_naive \
-        --result_csv       "$LOG_DIR/tta_v3_results_ood_classil_naive.csv"
+        --result_csv       "$LOG_DIR/tta_v3_results_ood_classil_naive.csv" \
+        "${TTA_RESET_ARGS[@]}"
 
 # ── TASK-IL — OOD ─────────────────────────────────────────────────────────────
 run_to_logs \
@@ -108,6 +127,7 @@ run_to_logs \
         --merge_model_path "$MERGED_DIR" \
         --swag_dir         "$SWAG_DIR" \
         --mode             taskil \
-        --result_csv       "$LOG_DIR/tta_v3_results_ood_taskil.csv"
+        --result_csv       "$LOG_DIR/tta_v3_results_ood_taskil.csv" \
+        "${TTA_RESET_ARGS[@]}"
 
 echo "[INFO] finished at $(date)"
