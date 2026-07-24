@@ -28,6 +28,7 @@ FINETUNED_DIR="${FINETUNED_DIR:-./checkpoints/finetuned}"
 MERGED_DIR="${MERGED_DIR:-./checkpoints/merged}"
 SWAG_DIR="${SWAG_DIR:-/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/checkpoints/swag_diagonal}"
 EPISODIC="${EPISODIC:-1}"
+INFERENCE_MODEL="${INFERENCE_MODEL:-}"
 # EPISODIC controls task-level reset behavior:
 #   EPISODIC=1 -> reset to source before each new task (default test_tta_v3.py behavior)
 #   EPISODIC=0 -> keep the adapted model across tasks via --no_reset_per_task
@@ -40,6 +41,19 @@ case "${EPISODIC,,}" in
         ;;
     *)
         echo "[ERROR] EPISODIC must be one of: 1/0, true/false, yes/no, on/off" >&2
+        exit 1
+        ;;
+esac
+
+INFERENCE_MODEL_ARGS=()
+case "${INFERENCE_MODEL,,}" in
+    "")
+        ;;
+    teacher|student)
+        INFERENCE_MODEL_ARGS+=(--inference_model "${INFERENCE_MODEL,,}")
+        ;;
+    *)
+        echo "[ERROR] INFERENCE_MODEL must be teacher or student" >&2
         exit 1
         ;;
 esac
@@ -86,6 +100,7 @@ echo "[INFO] PYTHON_BIN=$PYTHON_BIN"
 echo "[INFO] CONFIG=$CONFIG"
 echo "[INFO] SWAG_DIR=$SWAG_DIR"
 echo "[INFO] EPISODIC=$EPISODIC  reset_args=${TTA_RESET_ARGS[*]:-(reset_per_task)}"
+echo "[INFO] INFERENCE_MODEL=${INFERENCE_MODEL:-config default} (naive/TASK-IL only)"
 
 # ── Helper: check log không bị giữ bởi tiến trình khác ──────────────────────
 check_log_not_held() {
@@ -115,20 +130,20 @@ run_to_logs() {
     "$@" >> "$result_log" 2>> "$error_log"
 }
 
-# ── CLASS-IL TCP (chính) ──────────────────────────────────────────────────────
-run_to_logs \
-    "$LOG_DIR/test_new_run/result_tta_v3_classil_tcp.log" \
-    "$LOG_DIR/test_new_run/error_tta_v3_classil_tcp.log" \
-    "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
-        --entrypoint    test_tta_v3.py \
-        --config        "$CONFIG" \
-        --save_dir      "$FINETUNED_DIR" \
-        --merge_model_path "$MERGED_DIR" \
-        --swag_dir      "$SWAG_DIR" \
-        --mode          classil_tcp \
-        --result_csv    "$LOG_DIR/tta_v3_results_classil_tcp.csv" \
-        --tta_stats_csv "$LOG_DIR/tta_v3_stats_classil_tcp.csv" \
-        "${TTA_RESET_ARGS[@]}"
+# # ── CLASS-IL TCP (chính) ──────────────────────────────────────────────────────
+# run_to_logs \
+#     "$LOG_DIR/test_new_run/result_tta_v3_classil_tcp.log" \
+#     "$LOG_DIR/test_new_run/error_tta_v3_classil_tcp.log" \
+#     "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
+#         --entrypoint    test_tta_v3.py \
+#         --config        "$CONFIG" \
+#         --save_dir      "$FINETUNED_DIR" \
+#         --merge_model_path "$MERGED_DIR" \
+#         --swag_dir      "$SWAG_DIR" \
+#         --mode          classil_tcp \
+#         --result_csv    "$LOG_DIR/tta_v3_results_classil_tcp.csv" \
+#         --tta_stats_csv "$LOG_DIR/tta_v3_stats_classil_tcp.csv" \
+#         "${TTA_RESET_ARGS[@]}"
 
 # ── CLASS-IL Naive ────────────────────────────────────────────────────────────
 run_to_logs \
@@ -142,6 +157,7 @@ run_to_logs \
         --swag_dir      "$SWAG_DIR" \
         --mode          classil_naive \
         --result_csv    "$LOG_DIR/tta_v3_results_classil_naive.csv" \
+        "${INFERENCE_MODEL_ARGS[@]}" \
         "${TTA_RESET_ARGS[@]}"
 
 # ── TASK-IL ───────────────────────────────────────────────────────────────────
@@ -156,6 +172,7 @@ run_to_logs \
         --swag_dir      "$SWAG_DIR" \
         --mode          taskil \
         --result_csv    "$LOG_DIR/tta_v3_results_taskil.csv" \
+        "${INFERENCE_MODEL_ARGS[@]}" \
         "${TTA_RESET_ARGS[@]}"
 
 echo "[INFO] finished at $(date)"

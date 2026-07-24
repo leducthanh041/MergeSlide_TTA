@@ -95,10 +95,15 @@ def ensure_local_hot_storage() -> Path:
 def resolve_hot_path(path: str, local_root: Path) -> Path:
     raw = Path(path).expanduser()
     if not raw.is_absolute():
+        repo_path = PROJECT_ROOT / raw
+        if repo_path.exists():
+            return repo_path.resolve()
         parts = raw.parts
         if parts and parts[0] in HOT_DIR_NAMES:
             return local_root.joinpath(*parts)
         return raw
+    if raw.exists():
+        return raw.resolve()
     try:
         rel = raw.relative_to(PROJECT_ROOT)
         if rel.parts and rel.parts[0] in HOT_DIR_NAMES:
@@ -148,6 +153,7 @@ def eval_task_tta_v3(
     seq_dataset: Sequential_Generic_MIL_Dataset,
     fold_id: int,
     mode: str,
+    inference_model: str,
     reset_per_slide: bool,
     device: torch.device,
 ) -> tuple:
@@ -185,14 +191,17 @@ def eval_task_tta_v3(
         if mode == "taskil":
             pred_local, pred_task, prob_np, debug = adapter.adapt_and_predict(
                 features, coords, task_id=task_id, use_tcp_gate=False,
+                inference_model=inference_model,
             )
         elif is_naive:
             pred_local, pred_task, prob_np, debug = adapter.adapt_and_predict(
                 features, coords, task_id=None, use_tcp_gate=False,
+                inference_model=inference_model,
             )
         else:  # classil_tcp
             pred_local, pred_task, prob_np, debug = adapter.adapt_and_predict(
                 features, coords, task_id=None, use_tcp_gate=True,
+                inference_model="teacher",
             )
 
         times.append(time.time() - t0)
@@ -263,6 +272,16 @@ if __name__ == "__main__":
     parser.add_argument("--swag_dir",          type=str, required=True)
     parser.add_argument("--mode",              type=str, default="classil_tcp",
                         choices=["classil_tcp", "classil_naive", "taskil"])
+    parser.add_argument(
+        "--inference_model",
+        type=str,
+        choices=["teacher", "student"],
+        default=None,
+        help=(
+            "Final prediction backbone for classil_naive/taskil. "
+            "Overrides tta.inference_model; classil_tcp always uses teacher."
+        ),
+    )
     parser.add_argument("--no_reset_per_task", action="store_true")
     parser.add_argument("--episodic",          action="store_true")
     parser.add_argument("--result_csv",        type=str, default="")
@@ -295,7 +314,17 @@ if __name__ == "__main__":
     raw_tta = OmegaConf.to_container(cfg.get("tta", OmegaConf.create({})), resolve=True)
     tta_cfg = TTAConfig_v3(**{k: v for k, v in raw_tta.items() if hasattr(TTAConfig_v3, k)})
     tta_cfg.k_patches_std = K_PATCHES
+    configured_inference_model = str(tta_cfg.inference_model).strip().lower()
+    if configured_inference_model not in {"teacher", "student"}:
+        parser.error(
+            "tta.inference_model must be 'teacher' or 'student', "
+            f"got {tta_cfg.inference_model!r}"
+        )
+    inference_model = args.inference_model or configured_inference_model
+    if args.mode == "classil_tcp":
+        inference_model = "teacher"
     print(f"[INFO] TTAConfig_v3: {tta_cfg}")
+    print(f"[INFO] final inference model for mode={args.mode}: {inference_model}")
 
     # ── Dataset + prompt artifacts ───────────────────────────────────────────
     seq_dataset   = Sequential_Generic_MIL_Dataset(cfg)
@@ -404,6 +433,7 @@ if __name__ == "__main__":
                 seq_dataset     = seq_dataset,
                 fold_id         = fold_id,
                 mode            = args.mode,
+                inference_model = inference_model,
                 reset_per_slide = reset_per_slide,
                 device          = device,
             )
@@ -485,6 +515,7 @@ if __name__ == "__main__":
             all_results.append({
                 "fold": fold_id, "task_id": task_id, "task_name": task_name,
                 "mode": args.mode, "bacc": task_bacc, "acc": task_acc,
+                "inference_model": inference_model,
                 "n_samples": n_samples, "elapsed_s": elapsed,
                 "avg_ood_score":        np.mean(ood_scores),
                 "avg_tcp_conf":         np.mean(tcp_confs),
