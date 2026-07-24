@@ -56,6 +56,9 @@ from torch import Tensor
 
 @dataclass
 class TTAConfig_v3:
+    # Final prediction backbone for naive CLASS-IL and TASK-IL.
+    inference_model: str = "teacher"  # teacher | student
+
     # Module A — WSI Bag Augmentation (Frozen-to-Paraffin)
     K: int          = 8      # số augmented views cho teacher
     r_patch: float  = 0.75   # fraction của K_PATCHES cho mỗi aug view
@@ -185,6 +188,7 @@ class MergeSlide_TTA_Adapter_v3:
         coords: Tensor,
         task_id: Optional[int] = None,
         use_tcp_gate: bool = True,
+        inference_model: Optional[str] = None,
     ) -> tuple[int, int, dict]:
         """
         7 phases + Phase 5b (task prompt EMA update).
@@ -196,6 +200,15 @@ class MergeSlide_TTA_Adapter_v3:
         prob_np    : np.ndarray
         debug      : dict  — bổ sung loss_task, task_margin, prompt_updated
         """
+        inference_model = str(
+            inference_model or self.cfg.inference_model
+        ).strip().lower()
+        if inference_model not in {"teacher", "student"}:
+            raise ValueError(
+                "inference_model must be 'teacher' or 'student', "
+                f"got {inference_model!r}"
+            )
+
         N = features.shape[0]
 
         # ── Phase 1a: Standard patch subsample ──────────────────────────────
@@ -347,9 +360,14 @@ class MergeSlide_TTA_Adapter_v3:
         self._fim_restore(fisher_dict, fim_threshold)
 
         # ── Phase 7: Inference với TCP Confidence Gate ───────────────────────
-        self.teacher.eval()
+        # Student prediction uses the post-step, post-FIM-restoration weights.
+        # Teacher prediction uses the EMA-smoothed weights.
+        inference_backbone = (
+            self.student if inference_model == "student" else self.teacher
+        )
+        inference_backbone.eval()
         with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
-            z_inf = self.teacher(feat_std, coord_std, self.ps).float()
+            z_inf = inference_backbone(feat_std, coord_std, self.ps).float()
 
         tcp_conf = 0.0
         if task_id is not None:
@@ -397,6 +415,7 @@ class MergeSlide_TTA_Adapter_v3:
             "loss_total":     float(loss_total.detach().item()),
             "task_margin":    task_margin_val,                      # V3 NEW
             "prompt_updated": prompt_updated,                       # V3 NEW
+            "inference_model": inference_model,
         }
         return pred_local, pred_task, prob_np, debug
 
