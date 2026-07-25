@@ -125,7 +125,6 @@ def run_one_trial_naive(
     project_root: str,
     num_folds: int,
     entrypoint_wrapper: str | None,
-    no_reset_per_task: bool,
 ) -> dict:
     trial_dir = output_dir / f"trial_{trial_id:04d}"
     trial_dir.mkdir(parents=True, exist_ok=True)
@@ -173,9 +172,6 @@ def run_one_trial_naive(
         "--fold_end",
         str(num_folds),
     ]
-    if no_reset_per_task:
-        cmd.append("--no_reset_per_task")
-
     print(f"\n{'=' * 60}")
     print(f"[Naive Trial {trial_id:04d}] Setting={setting} objective=bACC")
     for key, value in params.items():
@@ -319,11 +315,6 @@ def main() -> None:
     parser.add_argument("--summarize_only", action="store_true")
     parser.add_argument("--trial_start", type=int, default=0)
     parser.add_argument("--trial_end", type=int, default=None)
-    parser.add_argument(
-        "--no_reset_per_task",
-        action="store_true",
-        help="Keep adapted model across tasks during each trial.",
-    )
     args = parser.parse_args()
 
     if args.python_bin:
@@ -352,7 +343,7 @@ def main() -> None:
     print(f"[TTA Naive Tuning] output_dir={output_dir}")
     print(f"[TTA Naive Tuning] manifest_path={manifest_path}")
     print(f"[TTA Naive Tuning] entrypoint_wrapper={args.entrypoint_wrapper or 'disabled'}")
-    print(f"[TTA Naive Tuning] no_reset_per_task={args.no_reset_per_task}")
+    print("[TTA Naive Tuning] reset policy: CLASS-IL naive=continual")
     print("[TTA Naive Tuning] fixed params:")
     for key, value in FIXED_NAIVE_TTA.items():
         print(f"  {key:15s}: {value}")
@@ -429,7 +420,6 @@ def main() -> None:
             project_root=args.project_root,
             num_folds=args.num_folds,
             entrypoint_wrapper=args.entrypoint_wrapper,
-            no_reset_per_task=args.no_reset_per_task,
         )
         all_results.append(result)
 

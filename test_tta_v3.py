@@ -282,8 +282,6 @@ if __name__ == "__main__":
             "Overrides tta.inference_model; classil_tcp always uses teacher."
         ),
     )
-    parser.add_argument("--no_reset_per_task", action="store_true")
-    parser.add_argument("--episodic",          action="store_true")
     parser.add_argument("--result_csv",        type=str, default="")
     parser.add_argument("--tta_stats_csv",     type=str, default="")
     parser.add_argument("--fold_start",        type=int, default=0)
@@ -302,11 +300,13 @@ if __name__ == "__main__":
     num_folds       = cfg.training.num_folds
     fold_start      = args.fold_start
     fold_end        = args.fold_end or num_folds
-    reset_per_task  = not args.no_reset_per_task
-    reset_per_slide = args.episodic
+    # CLASS-IL must not use oracle task boundaries to reset adaptation state.
+    # TASK-IL receives task identity by definition, so task-level reset is valid.
+    reset_per_task  = args.mode == "taskil"
+    reset_per_slide = False
 
     print(f"[INFO] MergeSlide-TTA v3  mode={args.mode}  "
-          f"reset_per_task={reset_per_task}  episodic={reset_per_slide}")
+          f"reset_per_task={reset_per_task}  reset_per_slide={reset_per_slide}")
     print(f"[INFO] folds: {fold_start} → {fold_end}")
     print(f"[INFO] swag_dir: {args.swag_dir}")
 

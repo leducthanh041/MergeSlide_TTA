@@ -299,22 +299,27 @@ class MergeSlide_TTA_Adapter_v3:
             y_corrected * F.log_softmax(logits_s / self.cfg.tau_c, dim=-1)
         ).sum(dim=-1).mean()
 
-        # L_task — V3 NEW: task-level margin loss
-        # Mục tiêu: push z_student tạo gap lớn hơn giữa task dẫn đầu và
-        # task thứ hai trong task prompt space.
-        # Không giả định routing đúng — chỉ push separation.
-        # Loss = 0 khi gap > margin_task (đã đủ confident).
-        task_scores_s = z_s_f32 @ self.task_prompts.T.detach()  # [1, T]
-        sorted_scores = task_scores_s.sort(dim=-1, descending=True).values
-        s_top1 = sorted_scores[:, 0]   # score của task dẫn đầu
-        s_top2 = sorted_scores[:, 1]   # score của task thứ hai
-        loss_task = F.relu(s_top2 - s_top1 + self.cfg.margin_task).mean()
+        # L_task only applies to TCP routing. Naive CLASS-IL and TASK-IL do not
+        # route with task prompts, so including it would alter gradients and FIM
+        # using an objective that is absent from their inference path.
+        if use_tcp_gate:
+            task_scores_s = z_s_f32 @ self.task_prompts.T.detach()  # [1, T]
+            sorted_scores = task_scores_s.sort(dim=-1, descending=True).values
+            s_top1 = sorted_scores[:, 0]
+            s_top2 = sorted_scores[:, 1]
+            loss_task = F.relu(
+                s_top2 - s_top1 + self.cfg.margin_task
+            ).mean()
+            gamma_task_eff = self.cfg.gamma_task
+        else:
+            loss_task = z_s_f32.new_zeros(())
+            gamma_task_eff = 0.0
 
         # L_total
         loss_total = (
             loss_petal
             + self.cfg.gamma_class * loss_class
-            + self.cfg.gamma_task  * loss_task
+            + gamma_task_eff * loss_task
         )
 
         # ── Phase 4a: Backward ───────────────────────────────────────────────
@@ -413,6 +418,8 @@ class MergeSlide_TTA_Adapter_v3:
             "loss_class":     float(loss_class.detach().item()),
             "loss_task":      float(loss_task.detach().item()),    # V3 NEW
             "loss_total":     float(loss_total.detach().item()),
+            "gamma_task_eff": float(gamma_task_eff),
+            "loss_task_active": bool(use_tcp_gate),
             "task_margin":    task_margin_val,                      # V3 NEW
             "prompt_updated": prompt_updated,                       # V3 NEW
             "inference_model": inference_model,

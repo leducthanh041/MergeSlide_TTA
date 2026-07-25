@@ -24,23 +24,7 @@ CONFIG="${CONFIG:-configs/default_tta_ood_eval_num_workers0.yaml}"
 FINETUNED_DIR="${FINETUNED_DIR:-./checkpoints_ood/finetuned}"
 MERGED_DIR="${MERGED_DIR:-./checkpoints_ood/merged}"
 SWAG_DIR="${SWAG_DIR:-/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/checkpoints_ood/swag_diagonal}"
-EPISODIC="${EPISODIC:-1}"
 INFERENCE_MODEL="${INFERENCE_MODEL:-}"
-# EPISODIC controls task-level reset behavior:
-#   EPISODIC=1 -> reset to source before each new task (default test_tta_v3.py behavior)
-#   EPISODIC=0 -> keep the adapted model across tasks via --no_reset_per_task
-TTA_RESET_ARGS=()
-case "${EPISODIC,,}" in
-    1|true|yes|y|on)
-        ;;
-    0|false|no|n|off)
-        TTA_RESET_ARGS+=(--no_reset_per_task)
-        ;;
-    *)
-        echo "[ERROR] EPISODIC must be one of: 1/0, true/false, yes/no, on/off" >&2
-        exit 1
-        ;;
-esac
 
 INFERENCE_MODEL_ARGS=()
 case "${INFERENCE_MODEL,,}" in
@@ -75,7 +59,7 @@ export HDF5_USE_FILE_LOCKING="${HDF5_USE_FILE_LOCKING:-FALSE}"
 
 echo "[INFO] start at $(date) — OOD TTA v3"
 echo "[INFO] SWAG_DIR=$SWAG_DIR"
-echo "[INFO] EPISODIC=$EPISODIC  reset_args=${TTA_RESET_ARGS[*]:-(reset_per_task)}"
+echo "[INFO] reset policy: CLASS-IL=continual, TASK-IL=reset_per_task"
 echo "[INFO] INFERENCE_MODEL=${INFERENCE_MODEL:-config default} (naive/TASK-IL only)"
 
 check_log_not_held() {
@@ -114,8 +98,7 @@ run_to_logs \
         --swag_dir         "$SWAG_DIR" \
         --mode             classil_tcp \
         --result_csv       "$LOG_DIR/tta_v3_results_ood_classil_tcp.csv" \
-        --tta_stats_csv    "$LOG_DIR/tta_v3_stats_ood_classil_tcp.csv" \
-        "${TTA_RESET_ARGS[@]}"
+        --tta_stats_csv    "$LOG_DIR/tta_v3_stats_ood_classil_tcp.csv"
 
 # ── CLASS-IL Naive — OOD ──────────────────────────────────────────────────────
 run_to_logs \
@@ -129,8 +112,8 @@ run_to_logs \
         --swag_dir         "$SWAG_DIR" \
         --mode             classil_naive \
         --result_csv       "$LOG_DIR/tta_v3_results_ood_classil_naive.csv" \
-        "${INFERENCE_MODEL_ARGS[@]}" \
-        "${TTA_RESET_ARGS[@]}"
+        --tta_stats_csv    "$LOG_DIR/tta_v3_stats_ood_classil_naive.csv" \
+        "${INFERENCE_MODEL_ARGS[@]}"
 
 # ── TASK-IL — OOD ─────────────────────────────────────────────────────────────
 run_to_logs \
@@ -144,7 +127,7 @@ run_to_logs \
         --swag_dir         "$SWAG_DIR" \
         --mode             taskil \
         --result_csv       "$LOG_DIR/tta_v3_results_ood_taskil.csv" \
-        "${INFERENCE_MODEL_ARGS[@]}" \
-        "${TTA_RESET_ARGS[@]}"
+        --tta_stats_csv    "$LOG_DIR/tta_v3_stats_ood_taskil.csv" \
+        "${INFERENCE_MODEL_ARGS[@]}"
 
 echo "[INFO] finished at $(date)"

@@ -28,19 +28,6 @@ GPU_A="${GPU_A:-4}"
 GPU_B="${GPU_B:-7}"
 WORKERS_PER_GPU="${WORKERS_PER_GPU:-2}"
 SINGLE_GPU="${SINGLE_GPU:-0}"
-EPISODIC="${EPISODIC:-1}"
-TTA_RESET_ARGS=()
-case "${EPISODIC,,}" in
-    1|true|yes|y|on)
-        ;;
-    0|false|no|n|off)
-        TTA_RESET_ARGS+=(--no_reset_per_task)
-        ;;
-    *)
-        echo "[ERROR] EPISODIC must be one of: 1/0, true/false, yes/no, on/off" >&2
-        exit 1
-        ;;
-esac
 
 cd "$PROJECT_ROOT"
 
@@ -94,7 +81,7 @@ echo "[INFO] FINETUNED_DIR=$FINETUNED_DIR"
 echo "[INFO] OUTPUT_ROOT=$OUTPUT_ROOT"
 echo "[INFO] N_TRIALS=$N_TRIALS"
 echo "[INFO] GPU_A=$GPU_A  GPU_B=$GPU_B  WORKERS_PER_GPU=$WORKERS_PER_GPU  SINGLE_GPU=$SINGLE_GPU"
-echo "[INFO] EPISODIC=$EPISODIC  reset_args=${TTA_RESET_ARGS[*]:-(reset_per_task)}"
+echo "[INFO] reset policy: CLASS-IL naive=continual"
 
 check_log_not_held() {
     local log_path="$1"
@@ -203,8 +190,7 @@ run_worker() {
             --entrypoint_wrapper "$ENTRYPOINT_WRAPPER" \
             --manifest_path "$manifest_path" \
             --trial_start "$trial_start" \
-            --trial_end "$trial_end" \
-            "${TTA_RESET_ARGS[@]}"
+            --trial_end "$trial_end"
     ) > "$worker_log" 2> "$worker_err" &
     RUN_WORKER_PID=$!
 }
