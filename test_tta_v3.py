@@ -24,6 +24,7 @@ Usage::
 
 import argparse
 import csv
+import json
 import os
 import time
 from pathlib import Path
@@ -95,15 +96,10 @@ def ensure_local_hot_storage() -> Path:
 def resolve_hot_path(path: str, local_root: Path) -> Path:
     raw = Path(path).expanduser()
     if not raw.is_absolute():
-        repo_path = PROJECT_ROOT / raw
-        if repo_path.exists():
-            return repo_path.resolve()
         parts = raw.parts
         if parts and parts[0] in HOT_DIR_NAMES:
             return local_root.joinpath(*parts)
         return raw
-    if raw.exists():
-        return raw.resolve()
     try:
         rel = raw.relative_to(PROJECT_ROOT)
         if rel.parts and rel.parts[0] in HOT_DIR_NAMES:
@@ -153,7 +149,6 @@ def eval_task_tta_v3(
     seq_dataset: Sequential_Generic_MIL_Dataset,
     fold_id: int,
     mode: str,
-    inference_model: str,
     reset_per_slide: bool,
     device: torch.device,
 ) -> tuple:
@@ -179,32 +174,33 @@ def eval_task_tta_v3(
     for sample_idx, (features, coords, label) in enumerate(
         tqdm(test_loader, desc=f"  Task {task_id} {task_name}", leave=False)
     ):
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        t0 = time.perf_counter()
+
         features  = features.to(device)
         coords    = coords.long().to(device)
         label_int = int(label)
 
         if reset_per_slide:
-            adapter.reset_to_source()
-
-        t0 = time.time()
+            adapter.reset_adaptation_state()
 
         if mode == "taskil":
             pred_local, pred_task, prob_np, debug = adapter.adapt_and_predict(
                 features, coords, task_id=task_id, use_tcp_gate=False,
-                inference_model=inference_model,
             )
         elif is_naive:
             pred_local, pred_task, prob_np, debug = adapter.adapt_and_predict(
                 features, coords, task_id=None, use_tcp_gate=False,
-                inference_model=inference_model,
             )
         else:  # classil_tcp
             pred_local, pred_task, prob_np, debug = adapter.adapt_and_predict(
                 features, coords, task_id=None, use_tcp_gate=True,
-                inference_model="teacher",
             )
 
-        times.append(time.time() - t0)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        times.append(time.perf_counter() - t0)
 
         if is_naive:
             g_pred  = seq_dataset.task_to_global_class[pred_task].get(pred_local, -1)
@@ -273,17 +269,29 @@ if __name__ == "__main__":
     parser.add_argument("--mode",              type=str, default="classil_tcp",
                         choices=["classil_tcp", "classil_naive", "taskil"])
     parser.add_argument(
-        "--inference_model",
-        type=str,
-        choices=["teacher", "student"],
-        default=None,
+        "--reset_per_slide",
+        action="store_true",
+        help="Ablation: reset student, teacher, optimizer, and prompts before each slide.",
+    )
+    parser.add_argument(
+        "--reset_prompt_per_task",
+        action="store_true",
         help=(
-            "Final prediction backbone for classil_naive/taskil. "
-            "Overrides tta.inference_model; classil_tcp always uses teacher."
+            "Oracle-boundary ablation: reset only task prompts before each new task. "
+            "The adapted model is never reset at task boundaries."
         ),
     )
     parser.add_argument("--result_csv",        type=str, default="")
     parser.add_argument("--tta_stats_csv",     type=str, default="")
+    parser.add_argument(
+        "--efficiency_json",
+        type=str,
+        default="",
+        help=(
+            "Optional JSON path for updated parameters, optimizer steps, "
+            "synchronized latency/throughput, and peak VRAM."
+        ),
+    )
     parser.add_argument("--fold_start",        type=int, default=0)
     parser.add_argument("--fold_end",          type=int, default=None)
     args = parser.parse_args()
@@ -292,6 +300,8 @@ if __name__ == "__main__":
     args.save_dir         = str(resolve_hot_path(args.save_dir,         local_root))
     args.merge_model_path = str(resolve_hot_path(args.merge_model_path, local_root))
     args.swag_dir         = str(resolve_hot_path(args.swag_dir,         local_root))
+    if args.efficiency_json:
+        args.efficiency_json = str(resolve_hot_path(args.efficiency_json, local_root))
 
     cfg    = OmegaConf.load(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -300,13 +310,11 @@ if __name__ == "__main__":
     num_folds       = cfg.training.num_folds
     fold_start      = args.fold_start
     fold_end        = args.fold_end or num_folds
-    # CLASS-IL must not use oracle task boundaries to reset adaptation state.
-    # TASK-IL receives task identity by definition, so task-level reset is valid.
-    reset_per_task  = args.mode == "taskil"
-    reset_per_slide = False
+    reset_per_slide = args.reset_per_slide
 
     print(f"[INFO] MergeSlide-TTA v3  mode={args.mode}  "
-          f"reset_per_task={reset_per_task}  reset_per_slide={reset_per_slide}")
+          f"reset_per_slide={reset_per_slide}  "
+          f"reset_prompt_per_task={args.reset_prompt_per_task}")
     print(f"[INFO] folds: {fold_start} → {fold_end}")
     print(f"[INFO] swag_dir: {args.swag_dir}")
 
@@ -314,17 +322,7 @@ if __name__ == "__main__":
     raw_tta = OmegaConf.to_container(cfg.get("tta", OmegaConf.create({})), resolve=True)
     tta_cfg = TTAConfig_v3(**{k: v for k, v in raw_tta.items() if hasattr(TTAConfig_v3, k)})
     tta_cfg.k_patches_std = K_PATCHES
-    configured_inference_model = str(tta_cfg.inference_model).strip().lower()
-    if configured_inference_model not in {"teacher", "student"}:
-        parser.error(
-            "tta.inference_model must be 'teacher' or 'student', "
-            f"got {tta_cfg.inference_model!r}"
-        )
-    inference_model = args.inference_model or configured_inference_model
-    if args.mode == "classil_tcp":
-        inference_model = "teacher"
     print(f"[INFO] TTAConfig_v3: {tta_cfg}")
-    print(f"[INFO] final inference model for mode={args.mode}: {inference_model}")
 
     # ── Dataset + prompt artifacts ───────────────────────────────────────────
     seq_dataset   = Sequential_Generic_MIL_Dataset(cfg)
@@ -364,6 +362,11 @@ if __name__ == "__main__":
 
     all_results:   list[dict] = []
     all_tta_stats: list[dict] = []
+    efficiency_params: dict | None = None
+
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    eval_wall_start = time.perf_counter()
 
     for fold_id in tqdm(range(fold_start, fold_end), desc="Folds"):
         fold_name   = f"fold_{fold_id}"
@@ -393,6 +396,21 @@ if __name__ == "__main__":
             device               = device,
         )
         trainable = sum(p.numel() for p in adapter.student.parameters() if p.requires_grad)
+        if efficiency_params is None:
+            total_params = sum(p.numel() for p in adapter.student.parameters())
+            num_ln_layers = sum(
+                1
+                for module in adapter.student.modules()
+                if isinstance(module, nn.LayerNorm)
+                and any(p.requires_grad for p in module.parameters(recurse=False))
+            )
+            efficiency_params = {
+                "updated_object": "student LayerNorm parameters",
+                "updated_params": int(trainable),
+                "total_params": int(total_params),
+                "update_ratio": float(trainable / max(total_params, 1)),
+                "ln_layers": int(num_ln_layers),
+            }
         print(f"[Fold {fold_id}] Trainable LN params: {trainable:,}")
 
         all_accs:   list[float] = []
@@ -420,8 +438,8 @@ if __name__ == "__main__":
             task_name = seq_dataset.task_names[task_id]
             n_cls     = num_classes[task_id]
 
-            if reset_per_task and task_id > 0:
-                adapter.reset_to_source()
+            if args.reset_prompt_per_task and task_id > 0:
+                adapter.reset_task_prompts()
 
             _, _, test_loader = seq_dataset.get_data_loaders(fold_id, task_id)
 
@@ -433,7 +451,6 @@ if __name__ == "__main__":
                 seq_dataset     = seq_dataset,
                 fold_id         = fold_id,
                 mode            = args.mode,
-                inference_model = inference_model,
                 reset_per_slide = reset_per_slide,
                 device          = device,
             )
@@ -515,7 +532,8 @@ if __name__ == "__main__":
             all_results.append({
                 "fold": fold_id, "task_id": task_id, "task_name": task_name,
                 "mode": args.mode, "bacc": task_bacc, "acc": task_acc,
-                "inference_model": inference_model,
+                "reset_per_slide": reset_per_slide,
+                "reset_prompt_per_task": args.reset_prompt_per_task,
                 "n_samples": n_samples, "elapsed_s": elapsed,
                 "avg_ood_score":        np.mean(ood_scores),
                 "avg_tcp_conf":         np.mean(tcp_confs),
@@ -642,5 +660,65 @@ if __name__ == "__main__":
             writer = csv.DictWriter(f, fieldnames=list(all_tta_stats[0].keys()))
             writer.writeheader(); writer.writerows(all_tta_stats)
         print(f"[INFO] TTA stats saved → {args.tta_stats_csv}")
+
+    wall_elapsed_s = float(time.perf_counter() - eval_wall_start)
+    total_slide_count = int(sum(row["n_samples"] for row in all_results))
+    timed_elapsed_s = float(sum(row["elapsed_s"] for row in all_results))
+    time_per_slide_s = timed_elapsed_s / max(total_slide_count, 1)
+    peak_vram_mb = (
+        float(torch.cuda.max_memory_allocated(device) / (1024 ** 2))
+        if device.type == "cuda" else 0.0
+    )
+    efficiency = {
+        "method": "MergeSlide-TTA-v3",
+        "eval_setting": "task_il" if args.mode == "taskil" else "class_il",
+        "mode": args.mode,
+        "param_scope": "ln_only",
+        "tta_steps": 1,
+        "tta_steps_per_slide": 1,
+        "total_optimizer_steps": total_slide_count,
+        "patches_per_wsi": int(K_PATCHES),
+        "augmented_views": int(tta_cfg.K),
+        "patch_ratio_per_augmented_view": float(tta_cfg.r_patch),
+        "num_slides": total_slide_count,
+        "fold_start": int(fold_start),
+        "fold_end": int(fold_end),
+        "timing_scope": (
+            "per-slide device transfer, optional reset, online TTA update, "
+            "and final prediction; checkpoint/model setup excluded"
+        ),
+        "timing_cuda_synchronized": device.type == "cuda",
+        "adapt_merge_elapsed_s": None,
+        "inference_only_elapsed_s": None,
+        "online_adapt_inference_elapsed_s": timed_elapsed_s,
+        "end_to_end_elapsed_s": timed_elapsed_s,
+        "timed_elapsed_s": timed_elapsed_s,
+        "wall_elapsed_s": wall_elapsed_s,
+        "inference_only_time_per_slide_s": None,
+        "end_to_end_time_per_slide_s": time_per_slide_s,
+        "time_per_slide_s": time_per_slide_s,
+        "end_to_end_throughput_slides_per_s": (
+            total_slide_count / max(timed_elapsed_s, 1e-12)
+        ),
+        "throughput_slides_per_s": (
+            total_slide_count / max(timed_elapsed_s, 1e-12)
+        ),
+        "peak_vram_eval_mb": peak_vram_mb,
+        "peak_vram_adapt_mb": peak_vram_mb,
+        "backprop": True,
+        "source_free": True,
+        "label_free": True,
+        "reset_per_slide": bool(reset_per_slide),
+        "reset_prompt_per_task": bool(args.reset_prompt_per_task),
+        **(efficiency_params or {}),
+    }
+    print(f"[EFFICIENCY] {json.dumps(efficiency, sort_keys=True)}")
+    if args.efficiency_json:
+        efficiency_path = Path(args.efficiency_json)
+        efficiency_path.parent.mkdir(parents=True, exist_ok=True)
+        efficiency_path.write_text(
+            json.dumps(efficiency, indent=2), encoding="utf-8"
+        )
+        print(f"[INFO] Efficiency JSON saved → {efficiency_path}")
 
     print("\nDone.")

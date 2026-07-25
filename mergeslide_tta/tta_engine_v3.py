@@ -21,8 +21,9 @@ Changes vs. v2 (tta_engine.py):
        Confidence gate (TPT-inspired): chỉ update khi top1 - top2 > delta_margin
        để tránh contamination khi routing không tin cậy.
 
-    4. reset_to_source() — Reset cả task_prompts về source để tránh drift
-       tích lũy giữa các tasks.
+    4. Reset ablations are explicit:
+       reset_adaptation_state() resets online model state per slide;
+       reset_task_prompts() resets only prompt memory at task boundaries.
 
 Modules:
     A  : WSI Bag-level Augmentation       (Frozen-to-Paraffin, MICCAI 2021)
@@ -36,7 +37,7 @@ Modules:
 Usage::
     adapter = MergeSlide_TTA_Adapter_v3(...)
     pred_local, pred_task, prob_np, debug = adapter.adapt_and_predict(features, coords)
-    adapter.reset_to_source()
+    adapter.reset_adaptation_state()
 """
 from __future__ import annotations
 
@@ -56,9 +57,6 @@ from torch import Tensor
 
 @dataclass
 class TTAConfig_v3:
-    # Final prediction backbone for naive CLASS-IL and TASK-IL.
-    inference_model: str = "teacher"  # teacher | student
-
     # Module A — WSI Bag Augmentation (Frozen-to-Paraffin)
     K: int          = 8      # số augmented views cho teacher
     r_patch: float  = 0.75   # fraction của K_PATCHES cho mỗi aug view
@@ -188,7 +186,6 @@ class MergeSlide_TTA_Adapter_v3:
         coords: Tensor,
         task_id: Optional[int] = None,
         use_tcp_gate: bool = True,
-        inference_model: Optional[str] = None,
     ) -> tuple[int, int, dict]:
         """
         7 phases + Phase 5b (task prompt EMA update).
@@ -200,15 +197,6 @@ class MergeSlide_TTA_Adapter_v3:
         prob_np    : np.ndarray
         debug      : dict  — bổ sung loss_task, task_margin, prompt_updated
         """
-        inference_model = str(
-            inference_model or self.cfg.inference_model
-        ).strip().lower()
-        if inference_model not in {"teacher", "student"}:
-            raise ValueError(
-                "inference_model must be 'teacher' or 'student', "
-                f"got {inference_model!r}"
-            )
-
         N = features.shape[0]
 
         # ── Phase 1a: Standard patch subsample ──────────────────────────────
@@ -299,9 +287,8 @@ class MergeSlide_TTA_Adapter_v3:
             y_corrected * F.log_softmax(logits_s / self.cfg.tau_c, dim=-1)
         ).sum(dim=-1).mean()
 
-        # L_task only applies to TCP routing. Naive CLASS-IL and TASK-IL do not
-        # route with task prompts, so including it would alter gradients and FIM
-        # using an objective that is absent from their inference path.
+        # Task-prompt routing is part of TCP only. Keeping this loss inactive
+        # for naive CLASS-IL and TASK-IL also excludes it from gradients/FIM.
         if use_tcp_gate:
             task_scores_s = z_s_f32 @ self.task_prompts.T.detach()  # [1, T]
             sorted_scores = task_scores_s.sort(dim=-1, descending=True).values
@@ -365,14 +352,9 @@ class MergeSlide_TTA_Adapter_v3:
         self._fim_restore(fisher_dict, fim_threshold)
 
         # ── Phase 7: Inference với TCP Confidence Gate ───────────────────────
-        # Student prediction uses the post-step, post-FIM-restoration weights.
-        # Teacher prediction uses the EMA-smoothed weights.
-        inference_backbone = (
-            self.student if inference_model == "student" else self.teacher
-        )
-        inference_backbone.eval()
+        self.teacher.eval()
         with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
-            z_inf = inference_backbone(feat_std, coord_std, self.ps).float()
+            z_inf = self.teacher(feat_std, coord_std, self.ps).float()
 
         tcp_conf = 0.0
         if task_id is not None:
@@ -422,15 +404,11 @@ class MergeSlide_TTA_Adapter_v3:
             "loss_task_active": bool(use_tcp_gate),
             "task_margin":    task_margin_val,                      # V3 NEW
             "prompt_updated": prompt_updated,                       # V3 NEW
-            "inference_model": inference_model,
         }
         return pred_local, pred_task, prob_np, debug
 
-    def reset_to_source(self) -> None:
-        """
-        Reset student, teacher về anchor θ_0 và task_prompts về source.
-        V3: bổ sung reset task_prompts để tránh drift tích lũy giữa tasks.
-        """
+    def reset_adaptation_state(self) -> None:
+        """Reset online model, optimizer, and prompt state for per-slide ablation."""
         merged_sd = {k: v.to(self.device) for k, v in self.anchor_sd.items()}
 
         with torch.no_grad():
@@ -439,12 +417,15 @@ class MergeSlide_TTA_Adapter_v3:
                     param.data.copy_(merged_sd[name])
 
         self.teacher.load_state_dict(merged_sd, strict=True)
-
-        # V3: Reset task_prompts về source
-        self.task_prompts.data.copy_(self.task_prompts_source)
+        self.reset_task_prompts()
 
         ln_params = [p for p in self.student.parameters() if p.requires_grad]
         self.optimizer = torch.optim.AdamW(ln_params, lr=self.cfg.eta_base, weight_decay=0.0)
+
+    def reset_task_prompts(self) -> None:
+        """Reset only mutable task-prompt memory to its source embeddings."""
+        with torch.no_grad():
+            self.task_prompts.copy_(self.task_prompts_source)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Private helpers (giữ nguyên từ v2, chỉ bổ sung _update_task_prompt)

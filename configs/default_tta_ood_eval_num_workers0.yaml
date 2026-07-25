@@ -55,7 +55,6 @@ paths:
 # Điều chỉnh cho domain shift mạnh hơn
 # ─────────────────────────────────────────────
 tta:
-  inference_model: teacher  # teacher | student; used by naive CLASS-IL and TASK-IL
   K: 8
   r_patch: 0.75
 

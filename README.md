@@ -395,9 +395,16 @@ python -u tools/run_classil_with_pt_features.py \
 
 Useful flags:
 
-- `--episodic`: reset the adapted model before each slide.
-- `--no_reset_per_task`: do not reset adaptation state between tasks.
+- `--reset_per_slide`: ablation that resets student, teacher, optimizer, and
+  task prompts before every slide.
+- `--reset_prompt_per_task`: oracle-boundary ablation that resets only mutable
+  task prompts before each new task. The adapted model is never reset at task
+  boundaries.
 - `--fold_start` and `--fold_end`: run a subset of folds.
+
+By default, adaptation state is continuous across the full CLASS-IL stream.
+Resetting the model at known task boundaries is intentionally unsupported
+because those boundaries are unavailable in the standard CLASS-IL setting.
 
 ## Inference Modes
 

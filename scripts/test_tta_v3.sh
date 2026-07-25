@@ -27,20 +27,24 @@ CONFIG="${CONFIG:-configs/default_tta_eval_num_workers0.yaml}"
 FINETUNED_DIR="${FINETUNED_DIR:-./checkpoints/finetuned}"
 MERGED_DIR="${MERGED_DIR:-./checkpoints/merged}"
 SWAG_DIR="${SWAG_DIR:-/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/checkpoints/swag_diagonal}"
-INFERENCE_MODEL="${INFERENCE_MODEL:-}"
+RESET_PER_SLIDE="${RESET_PER_SLIDE:-0}"
+RESET_PROMPT_PER_TASK="${RESET_PROMPT_PER_TASK:-0}"
+TTA_ABLATION_ARGS=()
 
-INFERENCE_MODEL_ARGS=()
-case "${INFERENCE_MODEL,,}" in
-    "")
-        ;;
-    teacher|student)
-        INFERENCE_MODEL_ARGS+=(--inference_model "${INFERENCE_MODEL,,}")
-        ;;
-    *)
-        echo "[ERROR] INFERENCE_MODEL must be teacher or student" >&2
-        exit 1
-        ;;
-esac
+append_bool_flag() {
+    local value="${1,,}" flag="$2" name="$3"
+    case "$value" in
+        1|true|yes|y|on) TTA_ABLATION_ARGS+=("$flag") ;;
+        0|false|no|n|off) ;;
+        *)
+            echo "[ERROR] $name must be one of: 1/0, true/false, yes/no, on/off" >&2
+            exit 1
+            ;;
+    esac
+}
+
+append_bool_flag "$RESET_PER_SLIDE" --reset_per_slide RESET_PER_SLIDE
+append_bool_flag "$RESET_PROMPT_PER_TASK" --reset_prompt_per_task RESET_PROMPT_PER_TASK
 
 # Python binary
 if [ -z "${PYTHON_BIN:-}" ]; then
@@ -83,8 +87,8 @@ echo "[INFO] PROJECT_ROOT=$PROJECT_ROOT"
 echo "[INFO] PYTHON_BIN=$PYTHON_BIN"
 echo "[INFO] CONFIG=$CONFIG"
 echo "[INFO] SWAG_DIR=$SWAG_DIR"
-echo "[INFO] reset policy: CLASS-IL=continual, TASK-IL=reset_per_task"
-echo "[INFO] INFERENCE_MODEL=${INFERENCE_MODEL:-config default} (naive/TASK-IL only)"
+echo "[INFO] RESET_PER_SLIDE=$RESET_PER_SLIDE"
+echo "[INFO] RESET_PROMPT_PER_TASK=$RESET_PROMPT_PER_TASK"
 
 # ── Helper: check log không bị giữ bởi tiến trình khác ──────────────────────
 check_log_not_held() {
@@ -114,48 +118,50 @@ run_to_logs() {
     "$@" >> "$result_log" 2>> "$error_log"
 }
 
-# # ── CLASS-IL TCP (chính) ──────────────────────────────────────────────────────
+# ── CLASS-IL TCP (chính) ──────────────────────────────────────────────────────
+run_to_logs \
+    "$LOG_DIR/test_new_run/result_tta_v3_classil_tcp.log" \
+    "$LOG_DIR/test_new_run/error_tta_v3_classil_tcp.log" \
+    "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
+        --entrypoint    test_tta_v3.py \
+        --config        "$CONFIG" \
+        --save_dir      "$FINETUNED_DIR" \
+        --merge_model_path "$MERGED_DIR" \
+        --swag_dir      "$SWAG_DIR" \
+        --mode          classil_tcp \
+        --result_csv    "$LOG_DIR/tta_v3_results_classil_tcp.csv" \
+        --tta_stats_csv "$LOG_DIR/tta_v3_stats_classil_tcp.csv" \
+        --efficiency_json "$LOG_DIR/efficiency_tta_v3_classil_tcp.json" \
+        "${TTA_ABLATION_ARGS[@]}"
+
+# # ── CLASS-IL Naive ────────────────────────────────────────────────────────────
 # run_to_logs \
-#     "$LOG_DIR/test_new_run/result_tta_v3_classil_tcp.log" \
-#     "$LOG_DIR/test_new_run/error_tta_v3_classil_tcp.log" \
+#     "$LOG_DIR/test_new_run/result_tta_v3_classil_naive.log" \
+#     "$LOG_DIR/test_new_run/error_tta_v3_classil_naive.log" \
 #     "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
 #         --entrypoint    test_tta_v3.py \
 #         --config        "$CONFIG" \
 #         --save_dir      "$FINETUNED_DIR" \
 #         --merge_model_path "$MERGED_DIR" \
 #         --swag_dir      "$SWAG_DIR" \
-#         --mode          classil_tcp \
-#         --result_csv    "$LOG_DIR/tta_v3_results_classil_tcp.csv" \
-#         --tta_stats_csv "$LOG_DIR/tta_v3_stats_classil_tcp.csv"
+#         --mode          classil_naive \
+#         --result_csv    "$LOG_DIR/tta_v3_results_classil_naive.csv" \
+#         --efficiency_json "$LOG_DIR/efficiency_tta_v3_classil_naive.json" \
+#         "${TTA_ABLATION_ARGS[@]}"
 
-# ── CLASS-IL Naive ────────────────────────────────────────────────────────────
-run_to_logs \
-    "$LOG_DIR/test_new_run/result_tta_v3_classil_naive.log" \
-    "$LOG_DIR/test_new_run/error_tta_v3_classil_naive.log" \
-    "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
-        --entrypoint    test_tta_v3.py \
-        --config        "$CONFIG" \
-        --save_dir      "$FINETUNED_DIR" \
-        --merge_model_path "$MERGED_DIR" \
-        --swag_dir      "$SWAG_DIR" \
-        --mode          classil_naive \
-        --result_csv    "$LOG_DIR/tta_v3_results_classil_naive.csv" \
-        --tta_stats_csv "$LOG_DIR/tta_v3_stats_classil_naive.csv" \
-        "${INFERENCE_MODEL_ARGS[@]}"
-
-# ── TASK-IL ───────────────────────────────────────────────────────────────────
-run_to_logs \
-    "$LOG_DIR/test_taskIL/result_tta_v3_taskil.log" \
-    "$LOG_DIR/test_taskIL/error_tta_v3_taskil.log" \
-    "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
-        --entrypoint    test_tta_v3.py \
-        --config        "$CONFIG" \
-        --save_dir      "$FINETUNED_DIR" \
-        --merge_model_path "$MERGED_DIR" \
-        --swag_dir      "$SWAG_DIR" \
-        --mode          taskil \
-        --result_csv    "$LOG_DIR/tta_v3_results_taskil.csv" \
-        --tta_stats_csv "$LOG_DIR/tta_v3_stats_taskil.csv" \
-        "${INFERENCE_MODEL_ARGS[@]}"
+# # ── TASK-IL ───────────────────────────────────────────────────────────────────
+# run_to_logs \
+#     "$LOG_DIR/test_taskIL/result_tta_v3_taskil.log" \
+#     "$LOG_DIR/test_taskIL/error_tta_v3_taskil.log" \
+#     "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
+#         --entrypoint    test_tta_v3.py \
+#         --config        "$CONFIG" \
+#         --save_dir      "$FINETUNED_DIR" \
+#         --merge_model_path "$MERGED_DIR" \
+#         --swag_dir      "$SWAG_DIR" \
+#         --mode          taskil \
+#         --result_csv    "$LOG_DIR/tta_v3_results_taskil.csv" \
+#         --efficiency_json "$LOG_DIR/efficiency_tta_v3_taskil.json" \
+#         "${TTA_ABLATION_ARGS[@]}"
 
 echo "[INFO] finished at $(date)"
