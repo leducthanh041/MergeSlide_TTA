@@ -128,6 +128,39 @@ def build_global_mlp_weights(classifier, task_names, device):
     return global_w, torch.zeros(global_w.shape[0], device=device)
 
 
+def predicted_class_entropy(preds_global: np.ndarray, class_start: int, class_end: int) -> float:
+    """
+    Chẩn đoán chống collapse (Module G): entropy CHUẨN HOÁ của phân phối
+    LỚP ĐƯỢC DỰ ĐOÁN trong 1 task — KHÔNG phải entropy của từng slide
+    (đó là h_bar/jsd_k của Module F, đo việc khác).
+
+    Cơ sở: zMEMO.pdf báo cáo continual adaptation (dù chỉ 1 bước/điểm) có
+    thể suy biến thành "predicting a constant label with maximal confidence
+    regardless of the input". Nếu n_steps>1 khiến hiện tượng này xuất hiện,
+    entropy này sẽ giảm mạnh bất thường so với n_steps=1 dù accuracy không
+    tăng tương ứng — đây là tín hiệu cảnh báo sớm, không phải bằng chứng
+    chắc chắn (Assumption — cần đối chiếu thủ công với accuracy khi diễn giải).
+
+    Trả về giá trị chuẩn hoá trong [0, 1]: 1.0 = dự đoán trải đều mọi lớp
+    của task, 0.0 = dự đoán collapse hoàn toàn về 1 lớp duy nhất.
+    """
+    n_cls = class_end - class_start + 1
+    if n_cls <= 1 or len(preds_global) == 0:
+        return float("nan")
+    counts = np.zeros(n_cls, dtype=np.float64)
+    for g in preds_global:
+        idx = int(g) - class_start
+        if 0 <= idx < n_cls:
+            counts[idx] += 1
+    total = counts.sum()
+    if total == 0:
+        return float("nan")
+    probs = counts / total
+    nz = probs[probs > 0]
+    h = float(-(nz * np.log(nz)).sum())
+    return h / np.log(n_cls)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # One-fold, one-task evaluation loop — Core
 # ──────────────────────────────────────────────────────────────────────────────
@@ -396,9 +429,13 @@ if __name__ == "__main__":
             "aug_rate":       [],
             "avg_loss_petal": [],
             "avg_loss_class": [],
+            "avg_loss_reg":   [],
             "avg_h_bar":      [],
             "avg_jsd_k":      [],
             "sample_active_rate": [],
+            "avg_n_steps_used": [],
+            "avg_eta_step":      [],
+            "pred_class_entropy_norm": [],
         }
 
         for task_id in range(num_tasks):
@@ -445,26 +482,39 @@ if __name__ == "__main__":
             ood_scores      = [s["ood_score"]        for s in tta_stats]
             loss_petals     = [s["loss_petal"]        for s in tta_stats if not np.isnan(s["loss_petal"])]
             loss_classes    = [s["loss_class"]        for s in tta_stats if not np.isnan(s["loss_class"])]
+            loss_regs       = [s["loss_reg"]           for s in tta_stats if not np.isnan(s["loss_reg"])]
             h_bars          = [s["h_bar"]             for s in tta_stats]
             jsd_ks          = [s["jsd_k"]              for s in tta_stats]
             sample_actives  = [s["sample_active"]      for s in tta_stats]
+            n_steps_useds   = [s["n_steps_used"]       for s in tta_stats if s["sample_active"]]
+            eta_steps       = [s["eta_step"]           for s in tta_stats if s["sample_active"]]
             aug_rate        = sum(s["use_aug"] for s in tta_stats) / max(1, len(tta_stats))
             active_rate     = sum(sample_actives) / max(1, len(sample_actives))
+
+            class_start, class_end = seq_dataset.task_class_ranges[task_id]
+            pred_entropy_norm = predicted_class_entropy(preds_arr, class_start, class_end)
 
             fold_diag["avg_ood_score"].append(np.mean(ood_scores))
             fold_diag["aug_rate"].append(aug_rate)
             fold_diag["avg_loss_petal"].append(np.mean(loss_petals) if loss_petals else float("nan"))
             fold_diag["avg_loss_class"].append(np.mean(loss_classes) if loss_classes else float("nan"))
+            fold_diag["avg_loss_reg"].append(np.mean(loss_regs) if loss_regs else float("nan"))
             fold_diag["avg_h_bar"].append(np.mean(h_bars))
             fold_diag["avg_jsd_k"].append(np.mean(jsd_ks))
             fold_diag["sample_active_rate"].append(active_rate)
+            fold_diag["avg_n_steps_used"].append(np.mean(n_steps_useds) if n_steps_useds else float("nan"))
+            fold_diag["avg_eta_step"].append(np.mean(eta_steps) if eta_steps else float("nan"))
+            fold_diag["pred_class_entropy_norm"].append(pred_entropy_norm)
 
             print(
                 f"  [Fold {fold_id}][Task {task_id} {task_name}] "
                 f"ACC={task_acc*100:.4f}%  BAcc={task_bacc*100:.4f}%  "
                 f"OOD={np.mean(ood_scores):.3f}  "
                 f"H_bar={np.mean(h_bars):.3f}  JSD_K={np.mean(jsd_ks):.4f}  "
-                f"active={active_rate*100:.1f}%"
+                f"active={active_rate*100:.1f}%  "
+                f"n_steps={np.mean(n_steps_useds) if n_steps_useds else float('nan'):.2f}  "
+                f"H_pred_norm={pred_entropy_norm:.3f}  "
+                f"reg({tta_cfg.regularizer_type})={fold_diag['avg_loss_reg'][-1]:.4g}"
             )
 
             all_results.append({
@@ -476,12 +526,22 @@ if __name__ == "__main__":
                 "aug_rate":          aug_rate,
                 "avg_loss_petal":    fold_diag["avg_loss_petal"][-1],
                 "avg_loss_class":    fold_diag["avg_loss_class"][-1],
+                "avg_loss_reg":      fold_diag["avg_loss_reg"][-1],
                 "avg_h_bar":         np.mean(h_bars),
                 "avg_jsd_k":         np.mean(jsd_ks),
                 "sample_active_rate": active_rate,
+                "avg_n_steps_used":  fold_diag["avg_n_steps_used"][-1],
+                "avg_eta_step":      fold_diag["avg_eta_step"][-1],
+                "pred_class_entropy_norm": pred_entropy_norm,
                 "use_module_f":      tta_cfg.use_module_f,
                 "use_fisher_reg":    tta_cfg.use_fisher_reg,
                 "use_fim_restore":   tta_cfg.use_fim_restore,
+                "n_steps_cfg":       tta_cfg.n_steps,
+                "step_lr_policy":    tta_cfg.step_lr_policy,
+                "resample_per_step": tta_cfg.resample_per_step,
+                "regularizer_type":  tta_cfg.regularizer_type,
+                "l2_anchor_beta":    tta_cfg.l2_anchor_beta,
+                "spw":               tta_cfg.spw,
             })
             all_tta_stats.extend(tta_stats)
 
@@ -549,14 +609,21 @@ if __name__ == "__main__":
         s = np.std(accs_by_task[t])
         print(f"  Task {t}: {v*100:.4f}% ({s*100:.4f}%)")
 
-    print("\n===== TTA-Core Diagnostics (Module F) =====")
+    print("\n===== TTA-Core Diagnostics (Module F + Module G) =====")
     diag_keys = [
-        "avg_ood_score", "aug_rate", "avg_loss_petal", "avg_loss_class",
+        "avg_ood_score", "aug_rate", "avg_loss_petal", "avg_loss_class", "avg_loss_reg",
         "avg_h_bar", "avg_jsd_k", "sample_active_rate",
+        "avg_n_steps_used", "avg_eta_step", "pred_class_entropy_norm",
     ]
     for k in diag_keys:
         vals = [d[k] for d in overall_tta_diag]
-        print(f"  {k:25s}: {np.mean(vals):.4f} (+/-{np.std(vals):.4f})")
+        print(f"  {k:25s}: {np.nanmean(vals):.4f} (+/-{np.nanstd(vals):.4f})")
+    print(
+        "\n[LƯU Ý] pred_class_entropy_norm gần 0 (đặc biệt thấp hơn rõ rệt so với chạy "
+        "n_steps=1 cùng cấu hình khác) là dấu hiệu CẦN KIỂM TRA THỦ CÔNG nguy cơ collapse "
+        "(xem cảnh báo zMEMO.pdf về continual adaptation) — không tự động kết luận, "
+        "đối chiếu với bACC của task đó trước khi quyết định."
+    )
 
     # ── Save CSVs ─────────────────────────────────────────────────────────────
     if all_results:
@@ -590,6 +657,11 @@ if __name__ == "__main__":
         "use_module_f": tta_cfg.use_module_f,
         "use_fisher_reg": tta_cfg.use_fisher_reg,
         "use_fim_restore": tta_cfg.use_fim_restore,
+        "n_steps": tta_cfg.n_steps,
+        "step_lr_policy": tta_cfg.step_lr_policy,
+        "resample_per_step": tta_cfg.resample_per_step,
+        "regularizer_type": tta_cfg.regularizer_type,
+        "l2_anchor_beta": tta_cfg.l2_anchor_beta,
         "patches_per_wsi": int(K_PATCHES),
         "augmented_views_K": int(tta_cfg.K),
         "num_slides": total_slide_count,

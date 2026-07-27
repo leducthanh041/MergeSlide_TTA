@@ -97,14 +97,10 @@ tta:
   # Module G). Chỉ đổi các giá trị này trong config ablation riêng
   # (vd default_tta_core_nsteps2.yaml), KHÔNG sửa trực tiếp file này, để
   # giữ nguyên baseline n_steps=1 đã có kết quả tham chiếu.
-  n_steps: 1
-  step_lr_policy: "same"     # "same" | "div_n" | "div_sqrt_n" — chỉ có ý nghĩa khi n_steps>1
+  n_steps: 3
+  step_lr_policy: "div_n"    # AN TOÀN theo khuyến nghị: tổng "quãng đường" ~giữ nguyên so với n_steps=1
   resample_per_step: true    # lấy sub-bag mới mỗi bước (true) hay dùng chung 1 subsample (false, AC-16)
 
   # SWAG posterior estimation (dùng chung với swag_dir đã train ở bước SWAG)
   swag_epochs: 10
   swag_lr: 1.0e-4
-
-  # ── Module H — Regularizer bám-nguồn (MỚI) ─────────────────────────────
-  regularizer_type: "swag"   # "swag" (mặc định, hành vi cũ) | "l2_anchor"
-  l2_anchor_beta: 1.0        # chỉ dùng khi regularizer_type="l2_anchor" — PHẢI sweep riêng, không dùng lại spw

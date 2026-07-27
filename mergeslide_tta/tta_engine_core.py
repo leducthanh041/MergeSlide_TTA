@@ -26,6 +26,28 @@ So với tta_engine_v3.py, các thay đổi:
       regularizer kiểu EATA, tính một lần trước khi TTA bắt đầu (offline),
       cộng thêm vào loss dưới dạng soft L2 penalty. Không thay thế Module D
       mặc định; hai module có thể bật cùng lúc để ablate (AC-6).
+    - MỚI (tuỳ chọn, mặc định n_steps=1 = hành vi cũ hệt trước) — Module G:
+      Multi-step adaptation per slide. Chỉ áp dụng cho slide đã qua cổng
+      Module F (sample_active=True) — slide bị gate vẫn bỏ qua hoàn toàn
+      như trước, KHÔNG có gì thay đổi cho nhánh đó.
+      Thiết kế (xem thảo luận rủi ro collapse dựa trên zMEMO.pdf, mục
+      "preliminary experiments" của chính tác giả MEMO):
+        * y_corrected (DaPC) tính MỘT LẦN, dùng chung cho cả N bước —
+          không tính lại mỗi bước (anchor/teacher không đổi trong 1 slide).
+        * Bước đầu tiên (step 0) tái sử dụng ĐÚNG feat_std/coord_std đã
+          dùng cho Phase 1b — đảm bảo n_steps=1 cho kết quả HỆT như trước
+          khi chưa có Module G (backward-compatible tuyệt đối).
+        * Các bước sau (step 1..N-1), nếu resample_per_step=True (mặc
+          định), lấy lại sub-bag MỚI mỗi bước — tránh overfit vào 1
+          subsample cố định với pseudo-label có thể sai (AC-16).
+        * FIM tích luỹ (cộng dồn bình phương gradient) qua cả N bước,
+          Module D chỉ restore MỘT LẦN sau khi kết thúc N bước — không
+          restore giữa chừng (tránh xoá tiến độ của các bước trước đó).
+        * Teacher EMA cũng chỉ update MỘT LẦN sau N bước.
+        * step_lr_policy quyết định learning rate mỗi bước: "same" (giữ
+          nguyên eta_eff mỗi bước — tổng "quãng đường" ~N lần so với 1
+          bước, rủi ro cao nhất), "div_n" (eta_eff/N — tổng quãng đường
+          gần như giữ nguyên, an toàn nhất), "div_sqrt_n" (trung dung).
 
 Modules:
     A   : WSI Bag-level Augmentation        (Frozen-to-Paraffin, MICCAI 2021)
@@ -34,7 +56,9 @@ Modules:
     D   : FIM-based Parameter Restoration    (PETAL, CVPR 2023) — online, mặc định BẬT
     D'  : Fisher-weighted regularizer        (EATA-inspired) — offline, mặc định TẮT
     E   : Adaptive LR via OOD score          (NOTE-inspired, NeurIPS 2022)
-    F   : Consensus-based Sample Selection   (EATA-inspired, K-view JSD)     — MỚI
+    F   : Consensus-based Sample Selection   (EATA-inspired, K-view JSD)
+    G   : Multi-step adaptation per slide    (MỚI, mặc định n_steps=1 = tắt)
+    H   : Regularizer bám-nguồn có thể chọn  (MỚI, "swag" mặc định | "l2_anchor")
 
 Usage::
     adapter = MergeSlide_TTA_Adapter_Core(...)
@@ -81,6 +105,24 @@ class TTAConfig_Core:
     use_fim_restore: bool = True
     delta: float           = 0.03
 
+    # Module H — Chọn loại regularizer bám-nguồn (source-anchoring), MỚI.
+    # "swag" (mặc định, hành vi cũ hệt trước): -spw * log q(theta_s), q là
+    #   Gaussian posterior ước lượng bằng SWAG (mean_sd, var_sd), có
+    #   chuẩn hoá theo phương sai từng tham số.
+    # "l2_anchor": beta * sum((theta_s - theta_0)^2), theta_0 là checkpoint
+    #   đã merge (anchor_sd) — L2 đơn giản, KHÔNG chuẩn hoá theo phương sai,
+    #   theo đúng công thức l2_anchor_loss() trong ADAPT-Slide (EATA
+    #   simplified). Không cần mean_sd/var_sd để tính (vẫn phải truyền vào
+    #   constructor vì lý do tương thích chữ ký, nhưng không được dùng).
+    # LƯU Ý QUAN TRỌNG: hai regularizer KHÔNG cùng thang đo — spw (mặc định
+    # 1e-6) được hiệu chỉnh cho log-probability có chuẩn hoá phương sai,
+    # còn l2_anchor_beta (mặc định 1.0, theo đúng default của ADAPT-Slide)
+    # là trọng số cho tổng bình phương sai khác THÔ, không chuẩn hoá. TUYỆT
+    # ĐỐI không tái dùng giá trị spw đã tune cho l2_anchor_beta — cần sweep
+    # riêng (xem AC-18 trong hướng dẫn kèm theo).
+    regularizer_type: str = "swag"
+    l2_anchor_beta: float = 1.0
+
     # Module D' — Fisher-weighted regularizer (offline, mặc định tắt — AC-6)
     # LƯU Ý: omega(theta) phụ thuộc checkpoint đã merge của TỪNG FOLD, nên
     # KHÔNG lưu path cố định ở đây. TTAConfig_Core chỉ giữ cờ bật/tắt +
@@ -104,6 +146,19 @@ class TTAConfig_Core:
     conf_percentile: float   = 0.5     # giữ lại % thấp nhất theo H_bar (0.5 = giữ nửa "tự tin" hơn)
     agree_percentile: float  = 0.5     # giữ lại % thấp nhất theo JSD_K (0.5 = giữ nửa "đồng thuận" hơn)
     min_window_fill: int     = 30      # số sample tối thiểu trong cửa sổ trước khi gating có hiệu lực
+
+    # Module G — Multi-step adaptation per slide (MỚI, mặc định TẮT = hành vi cũ)
+    # n_steps=1 tuyệt đối tương đương hành vi trước khi có Module G (đã kiểm
+    # chứng bằng thiết kế: step đầu tiên luôn tái dùng feat_std/coord_std gốc).
+    n_steps: int              = 1
+    # "same": eta_step = eta_eff mỗi bước (tổng quãng đường ~N lần, rủi ro cao nhất)
+    # "div_n": eta_step = eta_eff / N (tổng quãng đường ~giữ nguyên, an toàn nhất)
+    # "div_sqrt_n": eta_step = eta_eff / sqrt(N) (trung dung)
+    step_lr_policy: str       = "same"
+    # True (mặc định): mỗi bước (trừ bước 0) lấy lại sub-bag MỚI, tránh
+    # overfit vào 1 subsample cố định. False: dùng chung 1 subsample cho cả
+    # N bước (baseline để ablate AC-16, giống "N epoch trên 1 batch cố định").
+    resample_per_step: bool   = True
 
     # Misc
     eps: float         = 1e-6
@@ -212,6 +267,22 @@ class MergeSlide_TTA_Adapter_Core:
         self._conf_gate  = _PercentileGate(cfg.conf_window,  cfg.conf_percentile,  cfg.min_window_fill)
         self._agree_gate = _PercentileGate(cfg.agree_window, cfg.agree_percentile, cfg.min_window_fill)
 
+        # ── Module G — validate step_lr_policy sớm (fail-fast trước khi chạy TTA) ──
+        if cfg.step_lr_policy not in ("same", "div_n", "div_sqrt_n"):
+            raise ValueError(
+                f"step_lr_policy phải là 'same', 'div_n', hoặc 'div_sqrt_n', "
+                f"nhận được: {cfg.step_lr_policy!r}"
+            )
+        if cfg.n_steps < 1:
+            raise ValueError(f"n_steps phải >= 1, nhận được: {cfg.n_steps}")
+
+        # ── Module H — validate regularizer_type sớm ─────────────────────────
+        if cfg.regularizer_type not in ("swag", "l2_anchor"):
+            raise ValueError(
+                f"regularizer_type phải là 'swag' hoặc 'l2_anchor', "
+                f"nhận được: {cfg.regularizer_type!r}"
+            )
+
     # ──────────────────────────────────────────────────────────────────────────
     # Public API
     # ──────────────────────────────────────────────────────────────────────────
@@ -297,8 +368,12 @@ class MergeSlide_TTA_Adapter_Core:
                 "conf_thresh": conf_thresh, "agree_thresh": agree_thresh,
                 "ood_score": ood_score, "eta_eff": eta_eff,
                 "use_aug": False,
+                "n_steps_used": 0,
+                "eta_step": float("nan"),
                 "loss_petal": float("nan"), "loss_class": float("nan"),
                 "loss_total": float("nan"),
+                "loss_reg": float("nan"),
+                "regularizer_type": self.cfg.regularizer_type,
                 "prob_global": g_prob.squeeze(0).detach().cpu().numpy(),
             }
             return pred_local, pred_task, prob_np, debug
@@ -320,61 +395,106 @@ class MergeSlide_TTA_Adapter_Core:
         else:
             y_corrected = 0.5 * (y_tilde + y_anchor_g).detach()
 
-        # ── Phase 2: Student forward (global logits, không t_adapt) ─────────
-        self.student.train()
-        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-            z_s = self.student(feat_std, coord_std, self.ps)
-        z_s_f32 = z_s.float()
-        logits_s = self._global_logits(z_s_f32)
+        # ── Phase 2-4 (Module G): N-step student adaptation ──────────────────
+        # n_steps=1 (mặc định) tương đương HỆT hành vi trước khi có Module G:
+        # bước duy nhất luôn tái dùng feat_std/coord_std đã tính OOD score ở
+        # Phase 1b, không có gì thay đổi. Chỉ khi n_steps>1 mới có khác biệt.
+        n_steps = self.cfg.n_steps
+        eta_step = self._compute_step_lr(eta_eff)
 
-        # ── Phase 3: Loss computation (Module C') ────────────────────────────
-        log_q = self._bayesian_log_q()
+        fisher_accum: dict[str, Tensor] = {}
+        loss_petal_sum = 0.0
+        loss_class_sum = 0.0
+        loss_total_sum = 0.0
+        loss_reg_sum   = 0.0
+        feat_step, coord_step = feat_std, coord_std  # step 0 luôn dùng subsample gốc
 
-        loss_ce = -(
-            y_corrected * F.log_softmax(logits_s, dim=-1)
-        ).sum(dim=-1).mean()
+        for step_i in range(n_steps):
+            if step_i > 0 and self.cfg.resample_per_step:
+                idx_step = torch.randperm(N, device=self.device)[:k]
+                feat_step  = features[idx_step]
+                coord_step = coords[idx_step]
+            # step_i > 0 và resample_per_step=False: giữ nguyên feat_step/coord_step
+            # của vòng lặp trước (dùng chung 1 subsample cho cả N bước — AC-16).
 
-        loss_petal = -self.cfg.spw * log_q + self.cfg.lam_ce * loss_ce
+            # ── Phase 2: Student forward (global logits, không t_adapt) ─────
+            self.student.train()
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                z_s = self.student(feat_step, coord_step, self.ps)
+            z_s_f32 = z_s.float()
+            logits_s = self._global_logits(z_s_f32)
 
-        loss_class = -(
-            y_corrected * F.log_softmax(logits_s / self.cfg.tau_c, dim=-1)
-        ).sum(dim=-1).mean()
+            # ── Phase 3: Loss computation (Module C' + Module H regularizer) ──
+            if self.cfg.regularizer_type == "l2_anchor":
+                reg_term = self.cfg.l2_anchor_beta * self._l2_anchor_loss()
+            else:  # "swag" — mặc định, hành vi cũ hệt trước
+                log_q = self._bayesian_log_q()
+                reg_term = -self.cfg.spw * log_q
 
-        loss_total = loss_petal + self.cfg.gamma_class * loss_class
+            loss_ce = -(
+                y_corrected * F.log_softmax(logits_s, dim=-1)
+            ).sum(dim=-1).mean()
 
-        # Module D' — Fisher-weighted regularizer (optional, AC-6)
-        if self.cfg.use_fisher_reg and self.fisher_omega is not None:
-            reg = z_s_f32.new_zeros(())
-            for name, param in self.student.named_parameters():
-                if not param.requires_grad or name not in self.fisher_omega:
-                    continue
-                omega      = self.fisher_omega[name].to(self.device)
-                anchor_val = self.anchor_sd[name].to(self.device)
-                reg = reg + (omega * (param - anchor_val).pow(2)).sum()
-            loss_total = loss_total + self.cfg.beta_fisher * reg
+            loss_petal = reg_term + self.cfg.lam_ce * loss_ce
 
-        # ── Phase 4a: Backward ───────────────────────────────────────────────
-        self.optimizer.zero_grad()
-        loss_total.backward()
+            loss_class = -(
+                y_corrected * F.log_softmax(logits_s / self.cfg.tau_c, dim=-1)
+            ).sum(dim=-1).mean()
 
-        # ── Phase 4b: FIM computation (cần cho Module D nếu bật) ─────────────
-        fisher_dict, fisher_flat = self._compute_fim()
+            loss_total = loss_petal + self.cfg.gamma_class * loss_class
+
+            # Module D' — Fisher-weighted regularizer (optional, AC-6)
+            if self.cfg.use_fisher_reg and self.fisher_omega is not None:
+                reg = z_s_f32.new_zeros(())
+                for name, param in self.student.named_parameters():
+                    if not param.requires_grad or name not in self.fisher_omega:
+                        continue
+                    omega      = self.fisher_omega[name].to(self.device)
+                    anchor_val = self.anchor_sd[name].to(self.device)
+                    reg = reg + (omega * (param - anchor_val).pow(2)).sum()
+                loss_total = loss_total + self.cfg.beta_fisher * reg
+
+            # ── Phase 4a: Backward (mỗi bước) ────────────────────────────────
+            self.optimizer.zero_grad()
+            loss_total.backward()
+
+            # ── Phase 4b: FIM bước này — CỘNG DỒN vào fisher_accum, KHÔNG
+            # restore ngay (restore một lần duy nhất sau khi hết N bước, xem
+            # Phase 6) để tránh xoá tiến độ của các bước trước đó. ─────────
+            step_fisher_dict, _ = self._compute_fim()
+            for name, val in step_fisher_dict.items():
+                if name in fisher_accum:
+                    fisher_accum[name] = fisher_accum[name] + val
+                else:
+                    fisher_accum[name] = val.clone()
+
+            # ── Phase 4c: Scale LR (theo step_lr_policy) và step ─────────────
+            for pg in self.optimizer.param_groups:
+                pg['lr'] = eta_step
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+
+            loss_petal_sum += float(loss_petal.detach().item())
+            loss_class_sum += float(loss_class.detach().item())
+            loss_total_sum += float(loss_total.detach().item())
+            loss_reg_sum   += float(reg_term.detach().item())
+
+        fisher_flat = (
+            torch.cat([v.reshape(-1) for v in fisher_accum.values()])
+            if fisher_accum else torch.zeros(1, device=self.device)
+        )
         fim_threshold = self._find_quantile(fisher_flat, self.cfg.delta)
 
-        # ── Phase 4c: Scale LR và step ───────────────────────────────────────
-        for pg in self.optimizer.param_groups:
-            pg['lr'] = eta_eff
-        self.optimizer.step()
-        self.optimizer.zero_grad()
-
-        # ── Phase 5: Teacher EMA ─────────────────────────────────────────────
+        # ── Phase 5: Teacher EMA (một lần duy nhất, sau khi hết N bước) ─────
         self._ema_update()
 
-        # ── Phase 6: FIM-based Parameter Restoration (Module D, mặc định bật) ──
+        # ── Phase 6: FIM-based Parameter Restoration (Module D, một lần) ────
         if self.cfg.use_fim_restore:
-            self._fim_restore(fisher_dict, fim_threshold)
+            self._fim_restore(fisher_accum, fim_threshold)
 
-        # ── Phase 7: Inference (naive, KHÔNG TCP) ────────────────────────────
+        # ── Phase 7: Inference (naive, KHÔNG TCP) — dùng feat_std/coord_std
+        # GỐC (không phải feat_step cuối cùng), để suy luận không phụ thuộc
+        # vào sub-bag ngẫu nhiên nào được lấy ở bước cuối. ───────────────────
         self.teacher.eval()
         with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
             z_inf = self.teacher(feat_std, coord_std, self.ps).float()
@@ -392,9 +512,13 @@ class MergeSlide_TTA_Adapter_Core:
             "h_bar": h_bar, "jsd_k": jsd_k,
             "conf_thresh": conf_thresh, "agree_thresh": agree_thresh,
             "ood_score": ood_score, "eta_eff": eta_eff, "use_aug": use_aug,
-            "loss_petal": float(loss_petal.detach().item()),
-            "loss_class": float(loss_class.detach().item()),
-            "loss_total": float(loss_total.detach().item()),
+            "n_steps_used": n_steps,
+            "eta_step": eta_step,
+            "loss_petal": loss_petal_sum / n_steps,
+            "loss_class": loss_class_sum / n_steps,
+            "loss_total": loss_total_sum / n_steps,
+            "loss_reg": loss_reg_sum / n_steps,
+            "regularizer_type": self.cfg.regularizer_type,
             "prob_global": g_prob.squeeze(0).detach().cpu().numpy(),
         }
         return pred_local, pred_task, prob_np, debug
@@ -452,6 +576,22 @@ class MergeSlide_TTA_Adapter_Core:
                 return t, g_pred - start
         return 0, 0
 
+    def _compute_step_lr(self, eta_eff: float) -> float:
+        """
+        Module G: quy đổi eta_eff (Module E — adaptive theo OOD score) thành
+        learning rate cho MỖI bước trong N bước, theo step_lr_policy.
+        n_steps=1 luôn cho kết quả = eta_eff bất kể policy nào (đảm bảo
+        tương thích ngược tuyệt đối với hành vi trước khi có Module G).
+        """
+        n = max(1, self.cfg.n_steps)
+        if n == 1:
+            return eta_eff
+        if self.cfg.step_lr_policy == "div_n":
+            return eta_eff / n
+        if self.cfg.step_lr_policy == "div_sqrt_n":
+            return eta_eff / (n ** 0.5)
+        return eta_eff  # "same"
+
     def _k_view_teacher_predictions(self, features: Tensor, coords: Tensor, N: int) -> Tensor:
         """
         Module A + Module F input: K forward pass qua teacher trên K sub-bag
@@ -496,6 +636,24 @@ class MergeSlide_TTA_Adapter_Core:
                 (param - mu).pow(2) / (sigma2 + self.cfg.eps)
             ).sum()
         return log_q
+
+    def _l2_anchor_loss(self) -> Tensor:
+        """
+        Module H (regularizer_type="l2_anchor"): L2 đơn giản về checkpoint
+        đã merge (anchor_sd = theta_0), KHÔNG chuẩn hoá theo phương sai —
+        đúng công thức l2_anchor_loss() trong ADAPT-Slide (adapt_slide/
+        tta_losses.py):
+            sum_i ((theta_s_i - theta_0_i)^2).sum()
+        Trọng số áp dụng ở nơi gọi (self.cfg.l2_anchor_beta), không nhân
+        sẵn trong hàm này — giữ hàm thuần "khoảng cách", giống thiết kế gốc.
+        """
+        reg = torch.tensor(0.0, device=self.device)
+        for name, param in self.student.named_parameters():
+            if not param.requires_grad:
+                continue
+            anchor_val = self.anchor_sd[name].to(self.device)
+            reg = reg + ((param - anchor_val) ** 2).sum()
+        return reg
 
     def _compute_fim(self) -> tuple[dict, Tensor]:
         fisher_dict: dict[str, Tensor] = {}

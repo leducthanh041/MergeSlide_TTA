@@ -106,5 +106,5 @@ tta:
   swag_lr: 1.0e-4
 
   # ── Module H — Regularizer bám-nguồn (MỚI) ─────────────────────────────
-  regularizer_type: "swag"   # "swag" (mặc định, hành vi cũ) | "l2_anchor"
+  regularizer_type: "l2_anchor"   # ABLATION: dùng L2-anchor thay SWAG
   l2_anchor_beta: 1.0        # chỉ dùng khi regularizer_type="l2_anchor" — PHẢI sweep riêng, không dùng lại spw
