@@ -51,7 +51,8 @@ paths:
   merged_checkpoints: "./checkpoints_ood/merged"
 
 # ─────────────────────────────────────────────
-# TTA-Core Hyperparameters — OOD setting
+# TTA-Unified hyperparameters cho OOD. Nhóm không tiền tố dùng cho
+# naive/task_il; nhóm tcp_* dùng riêng cho tcp.
 # ─────────────────────────────────────────────
 tta:
   K: 8
@@ -62,16 +63,15 @@ tta:
   beta_ind: 1.2
   beta_ood: 1.5
 
-  spw: 1.0e-6
+  spw: 1.0e-6   # CẢNH BÁO: tune cho n_steps=1 trên IND, CHƯA re-sweep cho n_steps=3 hay cho OOD
   lam_ce: 1.0
   gamma_class: 0.5
   tau_c: 0.1
 
-  use_fim_restore: true
+  # Module D — ĐÃ CHỌN qua thực nghiệm trên IND: TẮT ("no FIM"). Chưa kiểm
+  # chứng riêng cho OOD — Assumption kế thừa từ IND.
+  use_fim_restore: false
   delta: 0.03
-
-  use_fisher_reg: false
-  beta_fisher: 0.0
 
   # OOD: eta_base cao hơn để adapt nhanh hơn
   eta_base: 0.0005
@@ -90,5 +90,42 @@ tta:
   agree_percentile: 0.5
   min_window_fill: 30
 
+  # ── Module G — ĐÃ CHỌN qua thực nghiệm trên IND: n_steps=3, div_n.
+  # Chưa kiểm chứng riêng cho OOD — Assumption kế thừa từ IND.
+  n_steps: 3
+  step_lr_policy: "div_n"
+  resample_per_step: true
+
   swag_epochs: 10
   swag_lr: 1.5e-4
+
+  # ── Module H — ĐÃ CHỌN qua thực nghiệm trên IND: "swag".
+  regularizer_type: "swag"
+  l2_anchor_beta: 1.0
+
+  # ── TCP legacy pipeline ─────────────────────────────────────────────────
+  # Chỉ đọc khi MODE=tcp: DaPC task-conditioned, L_task, prompt EMA và
+  # TCP confidence gate. FIM được tắt rõ ràng.
+  tcp_K: 8
+  tcp_r_patch: 0.75
+  tcp_tau_ap_ind: 0.92
+  tcp_tau_ap_ood: 0.70
+  tcp_beta_ind: 1.2
+  tcp_beta_ood: 1.5
+  tcp_spw: 1.0e-6
+  tcp_lam_ce: 1.0
+  tcp_gamma_class: 1.0
+  tcp_tau_c: 0.07
+  tcp_gamma_task: 0.5
+  tcp_margin_task: 0.1
+  tcp_use_fim_restore: false
+  tcp_delta: 0.03
+  tcp_eta_base: 1.0e-4
+  tcp_tau_ood: 0.2
+  tcp_ema_alpha: 0.999
+  tcp_alpha_task_prompt: 0.999
+  tcp_delta_margin: 0.10
+  tcp_tau_task: 0.70
+
+  # Dùng chung cho cả hai pipeline.
+  k_patches_std: 400

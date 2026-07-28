@@ -1,25 +1,54 @@
 """
 test_tta_core.py
 =================
-Test-Time Adaptation evaluation — MergeSlide-TTA-Core (no TCP, no L_task).
+Test-Time Adaptation evaluation — MergeSlide-TTA-Unified. Engine dùng
+chung tta_engine_core.py, TÁCH THÀNH 2 PIPELINE ADAPT RIÊNG (xem docstring
+đầu mergeslide_tta/tta_engine_core.py):
 
-Mirror có chủ đích của test_tta_v3.py, nhưng:
-    - Chỉ chạy naive/global objective (không có --mode; luôn tương đương
-      classil_naive của v3, nhưng dùng engine riêng tta_engine_core.py
-      thay vì tta_engine_v3.py với use_tcp_gate=False).
-    - KHÔNG cần task_prompts.pt, KHÔNG cần per_task_mlp_weights.
-    - Log thêm h_bar, jsd_k, sample_active, conf_thresh, agree_thresh mỗi
-      slide (phục vụ AC-8/AC-9/AC-10/AC-12 — xem tools/analyze_module_f_reliability.py).
-    - reset_task_boundary() được gọi ở đầu mỗi task (reset cửa sổ trượt
-      Module F — KHÔNG reset model, giữ đúng continual-adaptation mặc định).
+    - `--mode naive` (mặc định): Class-IL, kiến trúc MỚI (Module A-H) —
+      KHÔNG L_task, KHÔNG Task Prompt EMA.
+    - `--mode task_il`: Task-IL, kiến trúc MỚI, task đã biết trước (=
+      task_id của vòng lặp test hiện tại) — giới hạn TOÀN BỘ pipeline
+      xuống đúng không gian lớp của task đó.
+    - `--mode tcp`: Class-IL, kiến trúc CŨ PHỤC HỒI NGUYÊN BẢN (yêu cầu
+      --task_prompts_path) — DaPC theo t_adapt (route bằng z_teacher),
+      L_task, Task Prompt EMA Update (SwapPrompt-inspired, có confidence
+      gate), TCP Confidence Gate tại readout (fallback về naive), FIM
+      restore có cờ riêng và mặc định tắt. task_prompts là MUTABLE, cập nhật liên tục qua
+      các slide (continual) — dùng --reset_prompt_per_task để ablate.
+      SỬA LẠI SO VỚI PHIÊN BẢN TRƯỚC: trước đây "tcp" chỉ là readout,
+      không ảnh hưởng adapt — ĐÃ SAI, giờ phục hồi đúng hành vi gốc.
+    - Log thêm h_bar/jsd_k/... (naive, task_il) hoặc t_adapt/tcp_conf/
+      loss_task/task_margin/prompt_updated (tcp) mỗi slide.
+    - reset_task_boundary() gọi ở đầu mỗi task (reset cửa sổ Module F —
+      không có tác dụng với mode=tcp, không dùng Module F).
 
 Usage::
+    # Naive (mặc định)
     python test_tta_core.py \\
         --config   configs/default_tta_core_eval_num_workers0.yaml \\
         --merge_model_path checkpoints/merged \\
         --swag_dir checkpoints/swag_diagonal \\
         --result_csv logs/tta_core_results.csv \\
         --tta_stats_csv logs/tta_core_stats.csv
+
+    # TCP (kiến trúc cũ phục hồi nguyên bản, có L_task + Task Prompt EMA)
+    python test_tta_core.py \\
+        --config   configs/default_tta_core_eval_num_workers0.yaml \\
+        --mode tcp --task_prompts_path task_prompts.pt \\
+        --merge_model_path checkpoints/merged \\
+        --swag_dir checkpoints/swag_diagonal \\
+        --result_csv logs/tta_core_tcp_results.csv \\
+        --tta_stats_csv logs/tta_core_tcp_stats.csv
+
+    # Task-IL (kiến trúc mới, task đã biết trước, không cần task_prompts)
+    python test_tta_core.py \\
+        --config   configs/default_tta_core_eval_num_workers0.yaml \\
+        --mode task_il \\
+        --merge_model_path checkpoints/merged \\
+        --swag_dir checkpoints/swag_diagonal \\
+        --result_csv logs/tta_core_taskil_results.csv \\
+        --tta_stats_csv logs/tta_core_taskil_stats.csv
 """
 
 import argparse
@@ -173,6 +202,8 @@ def eval_task_tta_core(
     fold_id: int,
     reset_per_slide: bool,
     device: torch.device,
+    fixed_task_id: int | None = None,
+    mode: str = "naive",
 ) -> tuple:
     preds_all:           list[np.ndarray] = []
     targets_all:         list[np.ndarray] = []
@@ -198,7 +229,9 @@ def eval_task_tta_core(
         if reset_per_slide:
             adapter.reset_adaptation_state()
 
-        pred_local, pred_task, prob_np, debug = adapter.adapt_and_predict(features, coords)
+        pred_local, pred_task, prob_np, debug = adapter.adapt_and_predict(
+            features, coords, task_id=fixed_task_id, mode=mode
+        )
 
         if device.type == "cuda":
             torch.cuda.synchronize(device)
@@ -257,12 +290,35 @@ def eval_task_tta_core(
 if __name__ == "__main__":
     torch.multiprocessing.set_sharing_strategy("file_system")
 
-    parser = argparse.ArgumentParser(description="MergeSlide-TTA-Core evaluation (no TCP, no L_task)")
+    parser = argparse.ArgumentParser(description="MergeSlide-TTA-Unified evaluation (Module A-H + TCP readout tuỳ chọn)")
     parser.add_argument("--config",            type=str,
                         default="configs/default_tta_core_eval_num_workers0.yaml")
     parser.add_argument("--save_dir",          type=str, default="")  # giữ để tương thích CLI wrapper, không dùng
     parser.add_argument("--merge_model_path",  type=str, required=True)
     parser.add_argument("--swag_dir",          type=str, required=True)
+    parser.add_argument(
+        "--mode", type=str, default="naive", choices=["naive", "tcp", "task_il"],
+        help=(
+            "'naive': Class-IL, kiến trúc MỚI (Module A-H), flat 13 lớp. "
+            "'tcp': Class-IL, kiến trúc CŨ phục hồi nguyên bản (DaPC theo "
+            "t_adapt, L_task, Task Prompt EMA có gate, TCP Confidence Gate) — "
+            "task_prompts MUTABLE, ảnh hưởng TOÀN BỘ pipeline adapt, không "
+            "chỉ readout. 'task_il': Task-IL, kiến trúc MỚI, task ĐÃ BIẾT "
+            "TRƯỚC (= task_id của vòng lặp hiện tại) — giới hạn TOÀN BỘ "
+            "pipeline (Module F/B/C') xuống đúng không gian lớp của task đó."
+        ),
+    )
+    parser.add_argument(
+        "--task_prompts_path", type=str, default="task_prompts.pt",
+        help="Bắt buộc nếu --mode tcp. Tensor [T, 768], mutable (EMA update qua Phase 5b).",
+    )
+    parser.add_argument(
+        "--reset_prompt_per_task", action="store_true",
+        help=(
+            "Ablation (chỉ có tác dụng với --mode tcp): reset task_prompts về "
+            "bản gốc tại ranh giới mỗi task (mặc định: continual, không reset)."
+        ),
+    )
     parser.add_argument(
         "--reset_per_slide",
         action="store_true",
@@ -273,13 +329,6 @@ if __name__ == "__main__":
     parser.add_argument("--efficiency_json",   type=str, default="")
     parser.add_argument("--fold_start",        type=int, default=0)
     parser.add_argument("--fold_end",          type=int, default=None)
-    parser.add_argument(
-        "--fisher_omega_dir", type=str, default="",
-        help=(
-            "Thư mục chứa fold_{fold_id}.pt sinh bởi tools/compute_fisher_importance.py. "
-            "Chỉ bắt buộc nếu tta.use_fisher_reg=true trong config (Module D', AC-6)."
-        ),
-    )
     args = parser.parse_args()
 
     local_root = ensure_local_hot_storage()
@@ -291,8 +340,6 @@ if __name__ == "__main__":
         args.tta_stats_csv = str(resolve_hot_path(args.tta_stats_csv, local_root))
     if args.efficiency_json:
         args.efficiency_json = str(resolve_hot_path(args.efficiency_json, local_root))
-    if args.fisher_omega_dir:
-        args.fisher_omega_dir = str(resolve_hot_path(args.fisher_omega_dir, local_root))
 
     cfg    = OmegaConf.load(args.config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -308,16 +355,27 @@ if __name__ == "__main__":
         )
     reset_per_slide = args.reset_per_slide
 
-    print(f"[INFO] MergeSlide-TTA-Core  (no TCP, no L_task)  "
+    print(f"[INFO] MergeSlide-TTA-Unified  mode={args.mode}  "
           f"reset_per_slide={reset_per_slide}")
     print(f"[INFO] folds: {fold_start} -> {fold_end}")
     print(f"[INFO] swag_dir: {args.swag_dir}")
 
-    # ── TTA Core config ──────────────────────────────────────────────────────
+    # ── TTA config ────────────────────────────────────────────────────────────
     raw_tta = OmegaConf.to_container(cfg.get("tta", OmegaConf.create({})), resolve=True)
     tta_cfg = TTAConfig_Core(**{k: v for k, v in raw_tta.items() if hasattr(TTAConfig_Core, k)})
     tta_cfg.k_patches_std = K_PATCHES
     print(f"[INFO] TTAConfig_Core: {tta_cfg}")
+
+    task_prompts = None
+    if args.mode == "tcp":
+        tp_path = Path(args.task_prompts_path)
+        if not tp_path.exists():
+            raise FileNotFoundError(
+                f"--mode tcp yêu cầu task_prompts tại {tp_path}, không tìm thấy. "
+                "Dùng --task_prompts_path để trỏ đúng file (mặc định: task_prompts.pt)."
+            )
+        task_prompts = torch.load(str(tp_path), map_location="cpu")
+        print(f"[INFO] Loaded task_prompts (mode=tcp, MUTABLE) <- {tp_path}  shape={tuple(task_prompts.shape)}")
 
     # ── Dataset + prompt artifacts ───────────────────────────────────────────
     seq_dataset   = Sequential_Generic_MIL_Dataset(cfg)
@@ -368,24 +426,7 @@ if __name__ == "__main__":
         backbone_sd     = torch.load(str(merged_path), map_location="cpu")
         mean_sd, var_sd = SWAGDiagonal.load(str(swag_path), device="cpu")
 
-        fisher_omega = None
-        if tta_cfg.use_fisher_reg:
-            if not args.fisher_omega_dir:
-                raise ValueError(
-                    "tta.use_fisher_reg=true nhưng --fisher_omega_dir không được cung cấp. "
-                    "Chạy tools/compute_fisher_importance.py cho từng fold trước."
-                )
-            fisher_path = Path(args.fisher_omega_dir) / f"{fold_name}.pt"
-            if not fisher_path.exists():
-                raise FileNotFoundError(
-                    f"Fisher omega not found for {fold_name}: {fisher_path}. "
-                    "Chạy: python tools/compute_fisher_importance.py --fold "
-                    f"{fold_id} --out_path {fisher_path} ..."
-                )
-            fisher_omega = torch.load(str(fisher_path), map_location="cpu")
-            print(f"[Fold {fold_id}] Loaded Fisher omega <- {fisher_path}")
-
-        print(f"\n[Fold {fold_id}] Building TTA-Core adapter ...")
+        print(f"\n[Fold {fold_id}] Building TTA-Unified adapter (mode={args.mode}) ...")
         adapter = MergeSlide_TTA_Adapter_Core(
             base_vision_encoder = base_titan.vision_encoder,
             backbone_sd         = backbone_sd,
@@ -396,7 +437,7 @@ if __name__ == "__main__":
             task_class_ranges   = seq_dataset.task_class_ranges,
             cfg                 = tta_cfg,
             device              = device,
-            fisher_omega        = fisher_omega,
+            task_prompts        = task_prompts,
         )
         trainable = sum(p.numel() for p in adapter.student.parameters() if p.requires_grad)
         if efficiency_params is None:
@@ -424,19 +465,31 @@ if __name__ == "__main__":
         acc_per_task:  dict[int, float] = {}
         fold_time: float = 0.0
 
-        fold_diag = {
-            "avg_ood_score":  [],
-            "aug_rate":       [],
-            "avg_loss_petal": [],
-            "avg_loss_class": [],
-            "avg_loss_reg":   [],
-            "avg_h_bar":      [],
-            "avg_jsd_k":      [],
-            "sample_active_rate": [],
-            "avg_n_steps_used": [],
-            "avg_eta_step":      [],
-            "pred_class_entropy_norm": [],
-        }
+        if args.mode == "tcp":
+            fold_diag = {
+                "avg_ood_score":       [],
+                "avg_tcp_conf":        [],
+                "aug_rate":            [],
+                "avg_loss_petal":      [],
+                "avg_loss_class":      [],
+                "avg_loss_task":       [],
+                "avg_task_margin":     [],
+                "prompt_updated_rate": [],
+            }
+        else:
+            fold_diag = {
+                "avg_ood_score":  [],
+                "aug_rate":       [],
+                "avg_loss_petal": [],
+                "avg_loss_class": [],
+                "avg_loss_reg":   [],
+                "avg_h_bar":      [],
+                "avg_jsd_k":      [],
+                "sample_active_rate": [],
+                "avg_n_steps_used": [],
+                "avg_eta_step":      [],
+                "pred_class_entropy_norm": [],
+            }
 
         for task_id in range(num_tasks):
             task_name = seq_dataset.task_names[task_id]
@@ -444,6 +497,10 @@ if __name__ == "__main__":
 
             # Reset Module F sliding windows tại ranh giới task (KHÔNG reset model)
             adapter.reset_task_boundary()
+
+            # Ablation (chỉ mode=tcp): reset task_prompts về bản gốc mỗi task
+            if args.mode == "tcp" and args.reset_prompt_per_task and task_id > 0:
+                adapter.reset_task_prompts()
 
             _, _, test_loader = seq_dataset.get_data_loaders(fold_id, task_id)
 
@@ -456,6 +513,8 @@ if __name__ == "__main__":
                 fold_id         = fold_id,
                 reset_per_slide = reset_per_slide,
                 device          = device,
+                fixed_task_id   = task_id if args.mode == "task_il" else None,
+                mode            = args.mode,
             )
 
             n_samples = len(test_loader)
@@ -478,6 +537,57 @@ if __name__ == "__main__":
                         )
                     except ValueError:
                         pass
+
+            if args.mode == "tcp":
+                ood_scores     = [s["ood_score"]      for s in tta_stats]
+                tcp_confs      = [s["tcp_conf"]        for s in tta_stats]
+                loss_petals    = [s["loss_petal"]      for s in tta_stats]
+                loss_classes   = [s["loss_class"]      for s in tta_stats]
+                loss_tasks     = [s["loss_task"]       for s in tta_stats]
+                task_margins   = [s["task_margin"]     for s in tta_stats]
+                prompt_updates = [s["prompt_updated"]  for s in tta_stats]
+                aug_rate       = sum(s["use_aug"] for s in tta_stats) / max(1, len(tta_stats))
+
+                fold_diag["avg_ood_score"].append(np.mean(ood_scores))
+                fold_diag["avg_tcp_conf"].append(np.mean(tcp_confs))
+                fold_diag["aug_rate"].append(aug_rate)
+                fold_diag["avg_loss_petal"].append(np.mean(loss_petals))
+                fold_diag["avg_loss_class"].append(np.mean(loss_classes))
+                fold_diag["avg_loss_task"].append(np.mean(loss_tasks))
+                fold_diag["avg_task_margin"].append(np.mean(task_margins))
+                fold_diag["prompt_updated_rate"].append(np.mean(prompt_updates))
+
+                print(
+                    f"  [Fold {fold_id}][Task {task_id} {task_name}] "
+                    f"ACC={task_acc*100:.4f}%  BAcc={task_bacc*100:.4f}%  "
+                    f"OOD={np.mean(ood_scores):.3f}  tcp_conf={np.mean(tcp_confs):.3f}  "
+                    f"loss_task={np.mean(loss_tasks):.4f}  task_margin={np.mean(task_margins):.3f}  "
+                    f"prompt_updated={np.mean(prompt_updates)*100:.1f}%"
+                )
+
+                all_results.append({
+                    "fold": fold_id, "task_id": task_id, "task_name": task_name,
+                    "mode": "tcp", "bacc": task_bacc, "acc": task_acc,
+                    "reset_per_slide": reset_per_slide,
+                    "reset_prompt_per_task": args.reset_prompt_per_task,
+                    "n_samples": n_samples, "elapsed_s": elapsed,
+                    "avg_ood_score":      np.mean(ood_scores),
+                    "avg_tcp_conf":       np.mean(tcp_confs),
+                    "aug_rate":           aug_rate,
+                    "avg_loss_petal":     np.mean(loss_petals),
+                    "avg_loss_class":     np.mean(loss_classes),
+                    "avg_loss_task":      np.mean(loss_tasks),
+                    "avg_task_margin":    np.mean(task_margins),
+                    "prompt_updated_rate": np.mean(prompt_updates),
+                    "tcp_gamma_task":     tta_cfg.tcp_gamma_task,
+                    "tcp_margin_task":    tta_cfg.tcp_margin_task,
+                    "use_fim_restore":    tta_cfg.tcp_use_fim_restore,
+                    "tcp_alpha_task_prompt": tta_cfg.tcp_alpha_task_prompt,
+                    "tcp_delta_margin":   tta_cfg.tcp_delta_margin,
+                    "tcp_tau_task":       tta_cfg.tcp_tau_task,
+                })
+                all_tta_stats.extend(tta_stats)
+                continue  # bỏ qua khối naive/task_il bên dưới
 
             ood_scores      = [s["ood_score"]        for s in tta_stats]
             loss_petals     = [s["loss_petal"]        for s in tta_stats if not np.isnan(s["loss_petal"])]
@@ -519,7 +629,7 @@ if __name__ == "__main__":
 
             all_results.append({
                 "fold": fold_id, "task_id": task_id, "task_name": task_name,
-                "mode": "core_naive", "bacc": task_bacc, "acc": task_acc,
+                "mode": args.mode, "bacc": task_bacc, "acc": task_acc,
                 "reset_per_slide": reset_per_slide,
                 "n_samples": n_samples, "elapsed_s": elapsed,
                 "avg_ood_score":     np.mean(ood_scores),
@@ -534,13 +644,13 @@ if __name__ == "__main__":
                 "avg_eta_step":      fold_diag["avg_eta_step"][-1],
                 "pred_class_entropy_norm": pred_entropy_norm,
                 "use_module_f":      tta_cfg.use_module_f,
-                "use_fisher_reg":    tta_cfg.use_fisher_reg,
                 "use_fim_restore":   tta_cfg.use_fim_restore,
                 "n_steps_cfg":       tta_cfg.n_steps,
                 "step_lr_policy":    tta_cfg.step_lr_policy,
                 "resample_per_step": tta_cfg.resample_per_step,
                 "regularizer_type":  tta_cfg.regularizer_type,
                 "l2_anchor_beta":    tta_cfg.l2_anchor_beta,
+                "mode":              args.mode,
                 "spw":               tta_cfg.spw,
             })
             all_tta_stats.extend(tta_stats)
@@ -573,7 +683,7 @@ if __name__ == "__main__":
         )
 
     # ── Final summary ─────────────────────────────────────────────────────────
-    print(f"\n===== TTA-Core (no TCP, no L_task) Results =====")
+    print(f"\n===== MergeSlide-TTA-Unified (mode={args.mode}) Results =====")
     print(f"Accuracy:        {np.mean(overall_accs)*100:.4f}% ({np.std(overall_accs)*100:.4f}%)")
     print(f"Balanced Acc:    {np.mean(overall_baccs)*100:.4f}% ({np.std(overall_baccs)*100:.4f}%)")
     print(f"Macro F1:        {np.mean(overall_macro_f1s)*100:.4f}% ({np.std(overall_macro_f1s)*100:.4f}%)")
@@ -609,21 +719,32 @@ if __name__ == "__main__":
         s = np.std(accs_by_task[t])
         print(f"  Task {t}: {v*100:.4f}% ({s*100:.4f}%)")
 
-    print("\n===== TTA-Core Diagnostics (Module F + Module G) =====")
-    diag_keys = [
-        "avg_ood_score", "aug_rate", "avg_loss_petal", "avg_loss_class", "avg_loss_reg",
-        "avg_h_bar", "avg_jsd_k", "sample_active_rate",
-        "avg_n_steps_used", "avg_eta_step", "pred_class_entropy_norm",
-    ]
-    for k in diag_keys:
-        vals = [d[k] for d in overall_tta_diag]
-        print(f"  {k:25s}: {np.nanmean(vals):.4f} (+/-{np.nanstd(vals):.4f})")
-    print(
-        "\n[LƯU Ý] pred_class_entropy_norm gần 0 (đặc biệt thấp hơn rõ rệt so với chạy "
-        "n_steps=1 cùng cấu hình khác) là dấu hiệu CẦN KIỂM TRA THỦ CÔNG nguy cơ collapse "
-        "(xem cảnh báo zMEMO.pdf về continual adaptation) — không tự động kết luận, "
-        "đối chiếu với bACC của task đó trước khi quyết định."
-    )
+    if args.mode == "tcp":
+        print("\n===== TTA-Unified Diagnostics (mode=tcp, kiến trúc cũ phục hồi) =====")
+        diag_keys = [
+            "avg_ood_score", "avg_tcp_conf", "aug_rate",
+            "avg_loss_petal", "avg_loss_class", "avg_loss_task",
+            "avg_task_margin", "prompt_updated_rate",
+        ]
+        for k in diag_keys:
+            vals = [d[k] for d in overall_tta_diag]
+            print(f"  {k:25s}: {np.nanmean(vals):.4f} (+/-{np.nanstd(vals):.4f})")
+    else:
+        print("\n===== TTA-Unified Diagnostics (Module F + Module G + H) =====")
+        diag_keys = [
+            "avg_ood_score", "aug_rate", "avg_loss_petal", "avg_loss_class", "avg_loss_reg",
+            "avg_h_bar", "avg_jsd_k", "sample_active_rate",
+            "avg_n_steps_used", "avg_eta_step", "pred_class_entropy_norm",
+        ]
+        for k in diag_keys:
+            vals = [d[k] for d in overall_tta_diag]
+            print(f"  {k:25s}: {np.nanmean(vals):.4f} (+/-{np.nanstd(vals):.4f})")
+        print(
+            "\n[LƯU Ý] pred_class_entropy_norm gần 0 (đặc biệt thấp hơn rõ rệt so với chạy "
+            "n_steps=1 cùng cấu hình khác) là dấu hiệu CẦN KIỂM TRA THỦ CÔNG nguy cơ collapse "
+            "(xem cảnh báo zMEMO.pdf về continual adaptation) — không tự động kết luận, "
+            "đối chiếu với bACC của task đó trước khi quyết định."
+        )
 
     # ── Save CSVs ─────────────────────────────────────────────────────────────
     if all_results:
@@ -649,14 +770,23 @@ if __name__ == "__main__":
         float(torch.cuda.max_memory_allocated(device) / (1024 ** 2))
         if device.type == "cuda" else 0.0
     )
-    n_active = sum(1 for s in all_tta_stats if s.get("sample_active"))
+    # mode="tcp" không có Module F -- mọi slide đều adapt (không gate),
+    # "sample_active" không tồn tại trong debug schema của tcp.
+    if args.mode == "tcp":
+        n_active = total_slide_count
+    else:
+        n_active = sum(1 for s in all_tta_stats if s.get("sample_active"))
     efficiency = {
-        "method": "MergeSlide-TTA-Core",
-        "eval_setting": "class_il_naive",
+        "method": "MergeSlide-TTA-Unified",
+        "mode": args.mode,
+        "eval_setting": f"class_il_{args.mode}" if args.mode != "task_il" else "task_il",
         "param_scope": "ln_only",
         "use_module_f": tta_cfg.use_module_f,
-        "use_fisher_reg": tta_cfg.use_fisher_reg,
-        "use_fim_restore": tta_cfg.use_fim_restore,
+        "use_fim_restore": (
+            tta_cfg.tcp_use_fim_restore
+            if args.mode == "tcp"
+            else tta_cfg.use_fim_restore
+        ),
         "n_steps": tta_cfg.n_steps,
         "step_lr_policy": tta_cfg.step_lr_policy,
         "resample_per_step": tta_cfg.resample_per_step,

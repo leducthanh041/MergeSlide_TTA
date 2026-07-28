@@ -1,8 +1,7 @@
 #!/bin/bash
 #
-# TTA-Core evaluation runner — IND forward order (B->R->N->E->T->C)
-# KHÔNG TCP, KHÔNG L_task, CÓ Module F (consensus-based sample selection)
-# Mirror của scripts/test_tta_v3.sh nhưng dùng test_tta_core.py
+# MergeSlide-TTA-Unified evaluation runner — IND forward order.
+# Một config dùng chung; MODE chọn pipeline naive, tcp hoặc task_il.
 #
 #SBATCH --job-name=test_tta_core
 #SBATCH --output=logs/test_tta_core_%j.out
@@ -23,20 +22,37 @@ LOG_DIR="${LOG_DIR:-logs}"
 FOLD_START="${FOLD_START:-0}"
 FOLD_END="${FOLD_END:-10}"
 
-# Config — IND forward, num_workers=0
+# MODE: naive (Module A-H), tcp (legacy TCP đầy đủ), hoặc task_il.
+MODE="${MODE:-naive}"
+TASK_PROMPTS_PATH="${TASK_PROMPTS_PATH:-task_prompts.pt}"
+
+# RUN_TAG: hậu tố tên file để phân biệt các lần chạy khác nhau (vd
+# nsteps2, agree_off, tcp, task_il) — mặc định dùng luôn MODE để tránh
+# ghi đè giữa naive/tcp/task_il một cách vô tình.
+RUN_TAG="${RUN_TAG:-$MODE}"
+
+# Một config IND chứa các nhóm tham số độc lập cho mọi mode.
 CONFIG="${CONFIG:-configs/default_tta_core_eval_num_workers0.yaml}"
+
+case "$MODE" in
+    naive|tcp|task_il) ;;
+    *)
+        echo "[ERROR] MODE must be one of: naive, tcp, task_il" >&2
+        exit 1
+        ;;
+esac
 
 # Checkpoint paths
 MERGED_DIR="${MERGED_DIR:-./checkpoints/merged}"
 SWAG_DIR="${SWAG_DIR:-/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/checkpoints/swag_diagonal}"
 RESET_PER_SLIDE="${RESET_PER_SLIDE:-0}"
-FISHER_OMEGA_DIR="${FISHER_OMEGA_DIR:-}"     # chỉ cần nếu tta.use_fisher_reg=true trong CONFIG
-TTA_ABLATION_ARGS=()
+RESET_PROMPT_PER_TASK="${RESET_PROMPT_PER_TASK:-0}"
+TTA_EXTRA_ARGS=(--mode "$MODE")
 
 append_bool_flag() {
     local value="${1,,}" flag="$2" name="$3"
     case "$value" in
-        1|true|yes|y|on) TTA_ABLATION_ARGS+=("$flag") ;;
+        1|true|yes|y|on) TTA_EXTRA_ARGS+=("$flag") ;;
         0|false|no|n|off) ;;
         *)
             echo "[ERROR] $name must be one of: 1/0, true/false, yes/no, on/off" >&2
@@ -46,9 +62,14 @@ append_bool_flag() {
 }
 
 append_bool_flag "$RESET_PER_SLIDE" --reset_per_slide RESET_PER_SLIDE
+append_bool_flag "$RESET_PROMPT_PER_TASK" --reset_prompt_per_task RESET_PROMPT_PER_TASK
 
-if [ -n "$FISHER_OMEGA_DIR" ]; then
-    TTA_ABLATION_ARGS+=(--fisher_omega_dir "$FISHER_OMEGA_DIR")
+if [ "$MODE" = "tcp" ]; then
+    if [ ! -f "$TASK_PROMPTS_PATH" ]; then
+        echo "[ERROR] MODE=tcp yêu cầu task_prompts tại $TASK_PROMPTS_PATH, không tìm thấy." >&2
+        exit 1
+    fi
+    TTA_EXTRA_ARGS+=(--task_prompts_path "$TASK_PROMPTS_PATH")
 fi
 
 # Python binary
@@ -96,7 +117,7 @@ export SQLITE_TMPDIR="${SQLITE_TMPDIR:-$MERGESLIDE_LOCAL_ROOT/sqlite}"
 export HDF5_USE_FILE_LOCKING="${HDF5_USE_FILE_LOCKING:-FALSE}"
 
 echo "[INFO] start at $(date)"
-echo "[INFO] MergeSlide-TTA-Core (no TCP, no L_task) — IND forward"
+echo "[INFO] MergeSlide-TTA-Unified — IND forward — MODE=$MODE"
 echo "[INFO] PROJECT_ROOT=$PROJECT_ROOT"
 echo "[INFO] PYTHON_BIN=$PYTHON_BIN"
 echo "[INFO] CONFIG=$CONFIG"
@@ -104,8 +125,10 @@ echo "[INFO] MERGED_DIR=$MERGED_DIR"
 echo "[INFO] SWAG_DIR=$SWAG_DIR"
 echo "[INFO] LOG_DIR=$LOG_DIR"
 echo "[INFO] FOLDS=[$FOLD_START,$FOLD_END)"
+echo "[INFO] RUN_TAG=$RUN_TAG"
 echo "[INFO] RESET_PER_SLIDE=$RESET_PER_SLIDE"
-echo "[INFO] FISHER_OMEGA_DIR=${FISHER_OMEGA_DIR:-<not set>}"
+[ "$MODE" = "tcp" ] && echo "[INFO] TASK_PROMPTS_PATH=$TASK_PROMPTS_PATH"
+[ "$MODE" = "tcp" ] && echo "[INFO] RESET_PROMPT_PER_TASK=$RESET_PROMPT_PER_TASK"
 
 for ((fold = FOLD_START; fold < FOLD_END; fold++)); do
     merged_path="$MERGED_DIR/fold_${fold}/merged_final.pth"
@@ -148,18 +171,18 @@ run_to_logs() {
 }
 
 run_to_logs \
-    "$LOG_DIR/test_tta_core/result_tta_core_ind.log" \
-    "$LOG_DIR/test_tta_core/error_tta_core_ind.log" \
+    "$LOG_DIR/test_tta_core/result_tta_core_${RUN_TAG}.log" \
+    "$LOG_DIR/test_tta_core/error_tta_core_${RUN_TAG}.log" \
     "$PYTHON_BIN" -u tools/run_classil_with_pt_features.py \
         --entrypoint    test_tta_core.py \
         --config        "$CONFIG" \
         --merge_model_path "$MERGED_DIR" \
         --swag_dir      "$SWAG_DIR" \
-        --result_csv    "$LOG_DIR/tta_core_results_ind.csv" \
-        --tta_stats_csv "$LOG_DIR/tta_core_stats_ind.csv" \
-        --efficiency_json "$LOG_DIR/efficiency_tta_core_ind.json" \
+        --result_csv    "$LOG_DIR/tta_core_results_${RUN_TAG}.csv" \
+        --tta_stats_csv "$LOG_DIR/tta_core_stats_${RUN_TAG}.csv" \
+        --efficiency_json "$LOG_DIR/efficiency_tta_core_${RUN_TAG}.json" \
         --fold_start "$FOLD_START" \
         --fold_end "$FOLD_END" \
-        "${TTA_ABLATION_ARGS[@]}"
+        "${TTA_EXTRA_ARGS[@]}"
 
 echo "[INFO] finished at $(date)"
