@@ -20,6 +20,26 @@ import numpy as np
 from typing import Tuple
 from mergeslide_tta.constants import get_order_constants, CLASSIFIER_CLASS_RANGES_FORWARD
 
+
+def get_wsi_loader_kwargs(config_workers: int = 0) -> dict:
+    """Return bounded DataLoader options with an explicit runtime override.
+
+    WSI features live on shared storage, so worker count is intentionally not
+    changed by default.  ``WSI_NUM_WORKERS`` enables controlled overlap of
+    storage reads without changing the evaluation protocol.
+    """
+    configured = int(config_workers)
+    override = os.environ.get("WSI_NUM_WORKERS")
+    num_workers = configured if override is None else max(0, int(override))
+    options = {"num_workers": num_workers}
+    if num_workers > 0:
+        options.update(
+            pin_memory=os.environ.get("WSI_PIN_MEMORY", "1") == "1",
+            persistent_workers=os.environ.get("WSI_PERSISTENT_WORKERS", "1") == "1",
+            prefetch_factor=max(1, int(os.environ.get("WSI_PREFETCH_FACTOR", "2"))),
+        )
+    return options
+
 class ContinualDataset:
     """
     Continual learning evaluation setting.
@@ -485,6 +505,84 @@ class Generic_MIL_Dataset2_Split:
         coords = torch.from_numpy(coords)
         return (features, coords, label)
 
+
+class Generic_HEROHE_MIL_Dataset:
+    """HEROHE split loader for source-specific feature and coordinate roots."""
+
+    def __init__(self, train_coords, train_features, test_coords, test_features):
+        self.coords_dirs = {
+            "train": str(train_coords),
+            "test": str(test_coords),
+        }
+        self.feature_dirs = {
+            "train": str(train_features),
+            "test": str(test_features),
+        }
+
+    def return_splits(self, from_id=False, csv_path=None):
+        if from_id or not csv_path:
+            raise ValueError("HEROHE requires a CLAM-format split CSV")
+        slide_data = pd.read_csv(csv_path, index_col=0)
+        splits = []
+        for split_name in ("train", "val", "test"):
+            slides = slide_data[split_name].dropna().astype(str).tolist()
+            labels = (
+                slide_data[f"{split_name}_label"].dropna().astype(int).tolist()
+            )
+            if len(slides) != len(labels):
+                raise ValueError(
+                    f"HEROHE {split_name}: {len(slides)} slides but "
+                    f"{len(labels)} labels in {csv_path}"
+                )
+            splits.append(
+                Generic_HEROHE_MIL_Split(
+                    self.coords_dirs,
+                    self.feature_dirs,
+                    slides,
+                    labels,
+                )
+            )
+        return tuple(splits)
+
+
+class Generic_HEROHE_MIL_Split(Dataset):
+    def __init__(self, coords_dirs, feature_dirs, slides, labels):
+        self.coords_dirs = coords_dirs
+        self.feature_dirs = feature_dirs
+        self.slides = slides
+        self.labels = labels
+
+    def __len__(self):
+        return len(self.slides)
+
+    @staticmethod
+    def _load_pt(path):
+        try:
+            return torch.load(path, map_location="cpu", weights_only=True)
+        except TypeError:
+            return torch.load(path, map_location="cpu")
+
+    def __getitem__(self, idx):
+        slide_id = self.slides[idx]
+        source, source_id = slide_id.split("_", 1)
+        if source not in self.coords_dirs:
+            raise ValueError(f"Unsupported HEROHE slide id: {slide_id}")
+
+        coord_path = os.path.join(self.coords_dirs[source], f"{source_id}.h5")
+        feature_path = os.path.join(
+            self.feature_dirs[source], f"{source_id}.pt"
+        )
+        with h5py.File(coord_path, "r") as hdf5_file:
+            coords = hdf5_file["coords"][:]
+        features = self._load_pt(feature_path)
+        if features.shape[0] != coords.shape[0]:
+            raise RuntimeError(
+                f"HEROHE patch mismatch for {slide_id}: "
+                f"features={features.shape[0]} coords={coords.shape[0]}"
+            )
+        return features, torch.from_numpy(coords), self.labels[idx]
+
+
 class Generic_Split(Generic_MIL_Dataset):
 
     def __init__(self, slide_data, data_dir=None, num_classes=2):
@@ -542,9 +640,9 @@ class ConcatDataset(Dataset):
 
 class Sequential_Generic_MIL_Dataset(ContinualDataset):
     """
-    Sequential MIL dataset wrapper cho 6 TCGA tasks.
+    Sequential MIL dataset wrapper for six TCGA tasks.
 
-    Thứ tự task cố định:
+    Default task order:
         0: BRCA  (IDC / ILC)
         1: RCC   (CCRCC / PRCC / CHRCC)
         2: NSCLC (LUAD / LUSC)
@@ -553,8 +651,8 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
         5: CESC  (class 0 / class 1)
 
     Args:
-        cfg: OmegaConf DictConfig từ configs/default.yaml.
-             Nếu None, dùng lại path + dataloader config hardcode (backward compat).
+        cfg: OmegaConf DictConfig. If None, use the backward-compatible
+             hardcoded dataset paths and dataloader settings.
     """
 
     NAME = "seq-wsi"
@@ -574,11 +672,9 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
 
         if cfg is not None:
             self._init_from_config(cfg)
-            # Lấy dataloader config từ yaml
             self.batch_size  = cfg.dataloader.batch_size
             self.num_workers = cfg.dataloader.num_workers
 
-            # Đảo thứ tự nếu config yêu cầu
             order = getattr(cfg.dataset, "order", "forward")
             if order == 'reverse':
                 self.datasets   = list(reversed(self.datasets))
@@ -588,17 +684,24 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
              task_class_ranges, task_to_global_class) = get_order_constants(order)
             self.task_names  = list(task_names)
             self.num_classes = list(num_classes)
+            if len(self.datasets) > len(self.task_names):
+                if order != "forward":
+                    raise ValueError(
+                        "BRACS/HEROHE extension currently supports forward order only"
+                    )
+                self.task_names.extend(["BRACS", "HEROHE"])
+                self.num_classes.extend([3, 2])
         else:
             self._init_hardcoded()
-            # Fallback về giá trị gốc
             self.batch_size  = 1
             self.num_workers = 4
         
         self._order = order
+        self.N_TASKS = len(self.datasets)
         self._build_class_mappings()
 
     # ------------------------------------------------------------------
-    # Khởi tạo từ config
+    # Config-based initialization.
     # ------------------------------------------------------------------
 
     def _init_from_config(self, cfg):
@@ -638,6 +741,24 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
             d.tgct.splits,
             d.cesc.splits,
         ]
+
+        if "bracs" in d and "herohe" in d:
+            self.datasets.extend([
+                Generic_MIL_Dataset2(
+                    data_dir=d.bracs.features,
+                    label_dict={0: 0, 1: 1, 2: 2},
+                ),
+                Generic_HEROHE_MIL_Dataset(
+                    train_coords=d.herohe.train_coords,
+                    train_features=d.herohe.train_features,
+                    test_coords=d.herohe.test_coords,
+                    test_features=d.herohe.test_features,
+                ),
+            ])
+            self.split_dirs.extend([
+                d.bracs.splits,
+                d.herohe.splits,
+            ])
 
     # ------------------------------------------------------------------
     # Backward-compat fallback
@@ -692,17 +813,18 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
         return f"{self.split_dirs[task_id]}/splits_{fold}.csv"
 
     def _make_loader(self, dataset, shuffle: bool) -> DataLoader:
-        """Helper dùng chung — tránh lặp DataLoader constructor 6 lần."""
+        """Create a MIL DataLoader with the shared loader options."""
+        loader_options = get_wsi_loader_kwargs(self.num_workers)
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
             shuffle=shuffle,
-            num_workers=self.num_workers,
             collate_fn=collate_MIL,
+            **loader_options,
         )
 
     def get_data_loaders(self, fold: int, task_id: int):
-        """Trả về (train_loader, val_loader, test_loader) cho một task + fold."""
+        """Return train, validation, and test loaders for one task and fold."""
         train_ds, val_ds, test_ds = self.datasets[task_id].return_splits(
             from_id=False,
             csv_path=self._split_csv(task_id, fold),
@@ -719,8 +841,7 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
 
     def get_joint_data_loaders(self, fold: int):
         """
-        Trả về (train_loader, val_loader, test_loaders) gộp tất cả N_TASKS.
-        test_loaders là list — một phần tử per task.
+        Return joint train/validation loaders and one test loader per task.
         """
         train_datasets, val_datasets, test_loaders = [], [], []
 
@@ -748,16 +869,29 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
 
     def _build_class_mappings(self):
       """
-      Load TASK_CLASS_RANGES và TASK_TO_GLOBAL_CLASS từ constants.py
-      theo order hiện tại, sau đó verify bằng dynamic computation.
+      Load task class mappings for the current order and verify them against
+      the dynamically computed ranges.
       """
       order = getattr(self, "_order", "forward")
       (_, _, task_class_ranges, task_to_global_class) = get_order_constants(order)
+
+      if len(self.num_classes) == len(task_class_ranges):
+          self.task_class_ranges = dict(task_class_ranges)
+          self.task_to_global_class = dict(task_to_global_class)
+      else:
+          self.task_class_ranges = {}
+          self.task_to_global_class = {}
+          start = 0
+          for task_id, n_classes in enumerate(self.num_classes):
+              end = start + n_classes - 1
+              self.task_class_ranges[task_id] = [start, end]
+              self.task_to_global_class[task_id] = {
+                  local: global_id
+                  for local, global_id in enumerate(range(start, end + 1))
+              }
+              start = end + 1
   
-      self.task_class_ranges    = dict(task_class_ranges)
-      self.task_to_global_class = dict(task_to_global_class)
-  
-      # Verify: dynamic computation phải khớp với constants
+      # Verify that dynamic computation matches the constants.
       _start = 0
       for task_id, n in enumerate(self.num_classes):
           _end = _start + n - 1
@@ -770,8 +904,11 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
           }, f"task_to_global_class mismatch task {task_id}"
           _start = _end + 1
   
-      # classifier_class_ranges: luôn theo FORWARD — dùng để init MLP từ prompt_classifier
-      self.classifier_class_ranges = dict(CLASSIFIER_CLASS_RANGES_FORWARD)
+      # Classifier ranges stay in forward order for prompt-classifier initialization.
+      if len(self.num_classes) == len(CLASSIFIER_CLASS_RANGES_FORWARD):
+          self.classifier_class_ranges = dict(CLASSIFIER_CLASS_RANGES_FORWARD)
+      else:
+          self.classifier_class_ranges = dict(self.task_class_ranges)
         
 if __name__ == '__main__':
     seq_dataset = Sequential_Generic_MIL_Dataset()

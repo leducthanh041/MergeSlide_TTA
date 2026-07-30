@@ -40,26 +40,42 @@ def _as_tensor(value):
     return torch.from_numpy(value)
 
 
-def _load_features_pt_first(hdf5_file, pt_path: str, slide_id: str, coord_count: int):
-    if os.path.exists(pt_path):
-        pt_features = _torch_load_cpu(pt_path)
-        if pt_features.shape[0] == coord_count:
-            return pt_features
+def _load_h5_coords_and_features(h5_path: str, slide_id: str):
+    with h5py.File(h5_path, "r") as hdf5_file:
+        coords = hdf5_file["coords"][:]
+        features = hdf5_file["features"][:]
 
-        print(
-            "[WARN] PT/H5 patch-count mismatch; falling back to H5 features: "
-            f"{slide_id} pt={tuple(pt_features.shape)} coords={coord_count}",
-            file=sys.stderr,
-            flush=True,
-        )
-
-    features = hdf5_file["features"][:]
-    if features.shape[0] != coord_count:
+    if features.shape[0] != coords.shape[0]:
         raise RuntimeError(
             "Feature/coord patch-count mismatch: "
-            f"{slide_id} features={tuple(features.shape)} coords={coord_count}"
+            f"{slide_id} features={tuple(features.shape)} coords={tuple(coords.shape)}"
         )
-    return features
+    return coords, features
+
+
+def _load_h5_coords_only(h5_path: str):
+    with h5py.File(h5_path, "r") as hdf5_file:
+        return hdf5_file["coords"][:]
+
+
+def _load_features_pt_first(h5_path: str, pt_path: str, slide_id: str):
+    if not os.path.exists(pt_path):
+        return _load_h5_coords_and_features(h5_path, slide_id)
+
+    # Load PT before touching H5.  If PT is valid, H5 is opened only for
+    # coords; the H5 "features" dataset is never read.
+    pt_features = _torch_load_cpu(pt_path)
+    coords = _load_h5_coords_only(h5_path)
+    if pt_features.shape[0] == coords.shape[0]:
+        return coords, pt_features
+
+    print(
+        "[WARN] PT/H5 patch-count mismatch; falling back to H5 features: "
+        f"{slide_id} pt={tuple(pt_features.shape)} coords={tuple(coords.shape)}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return _load_h5_coords_and_features(h5_path, slide_id)
 
 
 def _patch_datasets() -> None:
@@ -72,11 +88,7 @@ def _patch_datasets() -> None:
         h5_path = os.path.join(self.data_dir, "h5_files", f"{stem}.h5")
         pt_path = os.path.join(self.data_dir, "pt_files", f"{stem}.pt")
 
-        with h5py.File(h5_path, "r") as hdf5_file:
-            coords = hdf5_file["coords"][:]
-            features = _load_features_pt_first(
-                hdf5_file, pt_path, slide_id, coords.shape[0]
-            )
+        coords, features = _load_features_pt_first(h5_path, pt_path, slide_id)
 
         return _as_tensor(features), torch.from_numpy(coords), label
 
@@ -86,11 +98,7 @@ def _patch_datasets() -> None:
         h5_path = os.path.join(self.data_dir, "h5_files", f"{slide_id}.h5")
         pt_path = os.path.join(self.data_dir, "pt_files", f"{slide_id}.pt")
 
-        with h5py.File(h5_path, "r") as hdf5_file:
-            coords = hdf5_file["coords"][:]
-            features = _load_features_pt_first(
-                hdf5_file, pt_path, slide_id, coords.shape[0]
-            )
+        coords, features = _load_features_pt_first(h5_path, pt_path, slide_id)
 
         return _as_tensor(features), torch.from_numpy(coords), label
 

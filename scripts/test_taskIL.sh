@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# TASK-IL evaluation runner. Logs/checkpoints are kept on local /docker via
-# repo symlinks, while datasets remain read-only inputs on /mmlab_students.
+# TASK-IL evaluation runner for IND/OOD forward and IND reverse protocols.
+# Task-IL knows the task identity, so tcp/naive is not used here.
 
 #SBATCH --job-name=test_taskIL
 #SBATCH --output=logs/test_taskIL_%j.out
@@ -18,15 +18,50 @@ PROJECT_ROOT="${PROJECT_ROOT:-/mmlab_students/storageStudents/nguyenvd/Thanhld/W
 USER_NAME="${USER:-thanhld}"
 PROJECT_NAME="$(basename "$PROJECT_ROOT")"
 export MERGESLIDE_LOCAL_ROOT="${MERGESLIDE_LOCAL_ROOT:-/docker/data/$USER_NAME/$PROJECT_NAME}"
-LOG_DIR="${LOG_DIR:-logs}"
-#CONFIG_FORWARD="${CONFIG_FORWARD:-configs/default_eval_num_workers0.yaml}"
-CONFIG_FORWARD="${CONFIG_FORWARD:-configs/default_ood_eval_num_workers0.yaml}"
-CONFIG_REVERSE="${CONFIG_REVERSE:-configs/default_reverse_eval_num_workers0.yaml}"
+
+SETTING="${SETTING:-ind}"
+ORDER="${ORDER:-forward}"
+MODE="${MODE:-}"
+LOG_DIR="${LOG_DIR:-}"
+if [ -n "$LOG_DIR" ] && [[ "$LOG_DIR" != /* && "$LOG_DIR" != logs && "$LOG_DIR" != logs/* ]]; then
+    LOG_DIR="logs/$LOG_DIR"
+fi
+if [ -z "$LOG_DIR" ]; then
+    LOG_DIR="logs/taskil/${SETTING}_${ORDER}"
+fi
+
+case "${SETTING}_${ORDER}" in
+    ood_forward)
+        CONFIG="${CONFIG:-configs/default_ood_eval_num_workers0.yaml}"
+        SAVE_DIR="${SAVE_DIR:-./checkpoints_ood/finetuned}"
+        MERGE_MODEL_PATH="${MERGE_MODEL_PATH:-./checkpoints_ood/merged}"
+        ;;
+    ind_forward)
+        CONFIG="${CONFIG:-configs/default_eval_num_workers0.yaml}"
+        SAVE_DIR="${SAVE_DIR:-./checkpoints/finetuned}"
+        MERGE_MODEL_PATH="${MERGE_MODEL_PATH:-./checkpoints/merged}"
+        ;;
+    ind_reverse)
+        CONFIG="${CONFIG:-configs/default_reverse_eval_num_workers0.yaml}"
+        SAVE_DIR="${SAVE_DIR:-./checkpoints/finetuned_reverse}"
+        MERGE_MODEL_PATH="${MERGE_MODEL_PATH:-./checkpoints/merged_reverse}"
+        ;;
+    ood_reverse)
+        echo "[ERROR] OOD reverse is not configured. Use SETTING=ind ORDER=reverse." >&2
+        exit 1
+        ;;
+    *)
+        echo "[ERROR] Unsupported SETTING/ORDER: SETTING=$SETTING ORDER=$ORDER (expected ind|ood with forward, or ind with reverse)" >&2
+        exit 1
+        ;;
+esac
+
 PT_FEATURE_WRAPPER="${PT_FEATURE_WRAPPER:-tools/run_classil_with_pt_features.py}"
 TASKIL_ENTRYPOINT="${TASKIL_ENTRYPOINT:-test_taskIL.py}"
-TASKIL_DEBUG="${TASKIL_DEBUG:-1}"
-TASKIL_DEBUG_TASKS="${TASKIL_DEBUG_TASKS:-5}"
-TASKIL_DEBUG_CSV="${TASKIL_DEBUG_CSV:-$MERGESLIDE_LOCAL_ROOT/debug_taskil_cesc_ood.csv}"
+
+if [ -n "$MODE" ]; then
+    echo "[WARN] MODE=$MODE is ignored for Task-IL because task identity is known." >&2
+fi
 
 if [ -z "${PYTHON_BIN:-}" ]; then
     DEFAULT_PYTHON="/mmlab_students/storageStudents/nguyenvd/anaconda3/envs/mergePre/bin/python3.10"
@@ -41,10 +76,11 @@ cd "$PROJECT_ROOT"
 
 mkdir -p "$MERGESLIDE_LOCAL_ROOT/logs" \
          "$MERGESLIDE_LOCAL_ROOT/checkpoints" \
+         "$MERGESLIDE_LOCAL_ROOT/checkpoints_ood" \
          "$MERGESLIDE_LOCAL_ROOT/sqlite" \
          "$MERGESLIDE_LOCAL_ROOT/tmp"
 
-for name in logs checkpoints; do
+for name in logs checkpoints checkpoints_ood; do
     repo_path="$PROJECT_ROOT/$name"
     local_path="$MERGESLIDE_LOCAL_ROOT/$name"
     if [ -L "$repo_path" ]; then
@@ -65,26 +101,14 @@ echo "[INFO] start at $(date)"
 echo "[INFO] project_root=$PROJECT_ROOT"
 echo "[INFO] python=$PYTHON_BIN"
 echo "[INFO] local_hot_root=$MERGESLIDE_LOCAL_ROOT"
+echo "[INFO] setting=$SETTING"
+echo "[INFO] order=$ORDER"
 echo "[INFO] log_dir=$LOG_DIR"
-echo "[INFO] config_forward=$CONFIG_FORWARD"
-echo "[INFO] config_reverse=$CONFIG_REVERSE"
+echo "[INFO] config=$CONFIG"
+echo "[INFO] save_dir=$SAVE_DIR"
+echo "[INFO] merge_model_path=$MERGE_MODEL_PATH"
 echo "[INFO] pt_feature_wrapper=$PT_FEATURE_WRAPPER"
 echo "[INFO] taskil_entrypoint=$TASKIL_ENTRYPOINT"
-echo "[INFO] taskil_debug=$TASKIL_DEBUG"
-echo "[INFO] taskil_debug_tasks=$TASKIL_DEBUG_TASKS"
-echo "[INFO] taskil_debug_csv=$TASKIL_DEBUG_CSV"
-
-TASKIL_DEBUG_ARGS=()
-if [ "$TASKIL_DEBUG" = "1" ]; then
-    TASKIL_DEBUG_ARGS+=(--debug)
-    if [ -n "$TASKIL_DEBUG_TASKS" ]; then
-        TASKIL_DEBUG_ARGS+=(--debug_tasks "$TASKIL_DEBUG_TASKS")
-    fi
-    if [ -n "$TASKIL_DEBUG_CSV" ]; then
-        mkdir -p "$(dirname "$TASKIL_DEBUG_CSV")"
-        TASKIL_DEBUG_ARGS+=(--debug_csv "$TASKIL_DEBUG_CSV")
-    fi
-fi
 
 check_log_not_held() {
     local log_path="$1"
@@ -138,19 +162,11 @@ run_to_logs() {
     "$@" >> "$result_log" 2>> "$error_log"
 }
 
-run_to_logs "$LOG_DIR/result_test_taskIL.log" "$LOG_DIR/error_test_taskIL.log" \
+run_to_logs "$LOG_DIR/result_taskil.log" "$LOG_DIR/error_taskil.log" \
     "$PYTHON_BIN" -u "$PT_FEATURE_WRAPPER" \
         --entrypoint "$TASKIL_ENTRYPOINT" \
-        --config "$CONFIG_FORWARD" \
-        --save_dir ./checkpoints_ood/finetuned \
-        --merge_model_path ./checkpoints_ood/merged \
-        "${TASKIL_DEBUG_ARGS[@]}"
-
-#run_to_logs "$LOG_DIR/result_test_taskIL_re.log" "$LOG_DIR/error_test_taskIL_re.log" \
-#    "$PYTHON_BIN" -u "$PT_FEATURE_WRAPPER" \
-#        --entrypoint "$TASKIL_ENTRYPOINT" \
-#        --config "$CONFIG_REVERSE" \
-#        --save_dir ./checkpoints/finetuned_reverse \
-#        --merge_model_path ./checkpoints/merged_reverse
+        --config "$CONFIG" \
+        --save_dir "$SAVE_DIR" \
+        --merge_model_path "$MERGE_MODEL_PATH"
 
 echo "[INFO] finished at $(date)"

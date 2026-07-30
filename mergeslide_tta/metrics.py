@@ -3,26 +3,23 @@ import numpy as np
 
 def forgetting(results: list[list[float]]) -> float:
     """
-    Tính average forgetting sau khi học xong task cuối.
+    Compute average forgetting after the final task.
 
-    results là triangular list of lists:
-        results[0] = [bacc_t0, bacc_t1]              # sau merge task 1
-        results[1] = [bacc_t0, bacc_t1, bacc_t2]     # sau merge task 2
+    results is a triangular list of lists:
+        results[0] = [bacc_t0, bacc_t1]
+        results[1] = [bacc_t0, bacc_t1, bacc_t2]
         ...
-        results[T-2] = [bacc_t0, ..., bacc_tT-1]     # sau merge task T-1
-
-    Số row = NUM_TASKS - 1 = 5
-    Row dài nhất = NUM_TASKS = 6  ← đây là max_len cần pad đến
+        results[T-2] = [bacc_t0, ..., bacc_tT-1]
     """
-    n_rows  = len(results)                        # = NUM_TASKS - 1 = 5
-    max_len = max(len(r) for r in results)        # = NUM_TASKS = 6  ← FIX
+    n_rows  = len(results)
+    max_len = max(len(r) for r in results)
 
-    # Pad tất cả row về max_len trước khi tạo numpy array
+    # Pad rows before converting to a dense array.
     for i in range(n_rows):
         results[i] += [0.0] * (max_len - len(results[i]))
 
-    np_res        = np.array(results)             # shape (5, 6) — OK
-    best_per_task = np.max(np_res, axis=0)        # peak BAcc mỗi task
+    np_res        = np.array(results)
+    best_per_task = np.max(np_res, axis=0)
 
     fgt = [best_per_task[i] - results[-1][i] for i in range(n_rows)]
     return float(np.mean(fgt))
@@ -30,11 +27,10 @@ def forgetting(results: list[list[float]]) -> float:
 
 def backward_transfer(results: list[list[float]]) -> float:
     """
-    Tính average Backward Transfer (BWT).
+    Compute average Backward Transfer (BWT).
 
-    results[i][i] = BAcc task i ngay sau khi học task i+1
-                    (diagonal của triangular matrix, offset 1).
-    results[-1][i] = BAcc task i sau khi học hết tất cả task.
+    results[i][i] is the score for task i when task i is first evaluated in the
+    triangular matrix; results[-1][i] is the score after all tasks.
     """
     n_rows = len(results)   # = NUM_TASKS - 1
     bwt = [results[-1][i] - results[i][i] for i in range(n_rows)]
@@ -44,9 +40,7 @@ def backward_transfer(results: list[list[float]]) -> float:
 def pad_numpy_arrays(arrays: list[np.ndarray],
                      pad_value: float = 0.0) -> np.ndarray:
     """
-    Pad list of arrays có shape khác nhau về cùng shape rồi stack.
-    Dùng khi per-task probability arrays có số cột khác nhau
-    (RCC có 3 class, các task khác có 2 class).
+    Pad arrays with different shapes to a common shape before stacking.
     """
     max_dim   = max(a.ndim for a in arrays)
     arrays    = [a.reshape((1,) * (max_dim - a.ndim) + a.shape) for a in arrays]

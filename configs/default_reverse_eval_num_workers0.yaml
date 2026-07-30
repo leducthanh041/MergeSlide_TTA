@@ -1,4 +1,4 @@
-# Eval-only reverse config for HDF5/NFS DataLoader stall debugging.
+# Eval-only reverse config with multiprocessing disabled for HDF5/NFS-safe loading.
 # Mirrors the reverse TCGA setup, but disables multiprocessing workers.
 
 dataset:

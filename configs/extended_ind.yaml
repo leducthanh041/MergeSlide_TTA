@@ -1,37 +1,39 @@
-# configs/default.yaml
-# Replace this with the local dataset root.
-
 dataset:
   root: "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/dataset"
-  
   order: "forward"
 
   brca:
     csv: "${dataset.root}/wsi_dataset_annotation/tcga_brca/tcga_brca_subset.csv"
     features: "${dataset.root}/TCGA-BRCA_processed/features/"
     splits: "${dataset.root}/wsi_dataset_annotation/tcga_brca"
-
   rcc:
     csv: "${dataset.root}/wsi_dataset_annotation/tcga_rcc/tcga_kidney_subset.csv"
     features: "${dataset.root}/TCGA-RCC_processed/features/"
     splits: "${dataset.root}/wsi_dataset_annotation/tcga_rcc"
-
   nsclc:
     csv: "${dataset.root}/wsi_dataset_annotation/tcga_nsclc/tcga_lung_subset.csv"
     features: "${dataset.root}/TCGA-NSCLC_processed/features/"
     splits: "${dataset.root}/wsi_dataset_annotation/tcga_nsclc"
-
   esca:
     features: "${dataset.root}/TCGA-ESCA_processed/features/"
     splits: "${dataset.root}/wsi_dataset_annotation/tcga_esca"
-
   tgct:
     features: "${dataset.root}/TCGA-TGCT_processed/features/"
     splits: "${dataset.root}/wsi_dataset_annotation/tcga_tgct"
-
   cesc:
     features: "${dataset.root}/TCGA-CESC_processed/features/"
     splits: "${dataset.root}/wsi_dataset_annotation/tcga_cesc"
+  bracs:
+    csv: "${dataset.root}/wsi_dataset_annotation/bracs/bracs.csv"
+    features: "${dataset.root}/BRACS/10x_256px_0px_overlap/features_conch_v15"
+    splits: "${dataset.root}/wsi_dataset_annotation/bracs"
+  herohe:
+    csv: "${dataset.root}/wsi_dataset_annotation/herohe/herohe.csv"
+    train_coords: "${dataset.root}/HEROHE/Training_herohe/coords_h5"
+    train_features: "${dataset.root}/HEROHE/Training_herohe/features_pt"
+    test_coords: "${dataset.root}/HEROHE/Test_herohe/coords_h5"
+    test_features: "${dataset.root}/HEROHE/Test_herohe/features_pt"
+    splits: "${dataset.root}/wsi_dataset_annotation/herohe"
 
 training:
   num_epochs: 10
@@ -39,13 +41,13 @@ training:
   weight_decay: 1.0e-4
   seed: 0
   num_folds: 10
-  num_tasks: 6
+  num_tasks: 8
 
 dataloader:
-  batch_size: 1       # MIL uses one WSI bag per batch.
-  num_workers: 40     # Increase for faster loading; reduce for constrained environments.
+  batch_size: 1
+  num_workers: 0
 
 paths:
   task_prompts: "./task_prompts.pt"
   finetuned_checkpoints: "./checkpoints/finetuned"
-  merged_checkpoints: "./checkpoints/merged"
+  merged_checkpoints: "./checkpoints/merged_extended"

@@ -321,3 +321,42 @@ def cesc_prompts():
             cls_template.extend([template.replace('CLASSNAME', prompts[i][j]) for template in templates])
         cls_templates.append(cls_template)
     return prompts, templates
+
+
+def bracs_prompts():
+    prompts = [
+        [
+            "benign breast tissue",
+            "benign breast lesion",
+            "benign breast tumor",
+        ],
+        [
+            "atypical breast lesion",
+            "atypical breast tissue",
+            "atypical breast tumor",
+        ],
+        [
+            "breast carcinoma",
+            "malignant breast tumor",
+            "malignant breast tissue",
+        ],
+    ]
+    _, templates = brca_prompts()
+    return prompts, templates
+
+
+def herohe_prompts():
+    prompts = [
+        [
+            "HER2-negative breast cancer",
+            "HER2-negative breast carcinoma",
+            "breast carcinoma without HER2 overexpression",
+        ],
+        [
+            "HER2-positive breast cancer",
+            "HER2-positive breast carcinoma",
+            "breast carcinoma with HER2 overexpression",
+        ],
+    ]
+    _, templates = brca_prompts()
+    return prompts, templates
