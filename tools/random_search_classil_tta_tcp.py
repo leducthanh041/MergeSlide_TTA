@@ -8,6 +8,7 @@ import csv
 import json
 import math
 import random
+import re
 import sys
 import time
 from datetime import datetime
@@ -52,19 +53,82 @@ REQUIRED_NAIVE_PARAMS = {
 }
 
 NUM_FOLDS = 10
-TASK_NAMES = ("BRCA", "RCC", "NSCLC", "ESCA", "TGCT", "CESC")
+TASK_NAMES = (
+    "BRCA",
+    "RCC",
+    "NSCLC",
+    "ESCA",
+    "TGCT",
+    "CESC",
+)
 ESCA_TASK_ID = 3
+TGCT_TASK_ID = 4
 CESC_TASK_ID = 5
 OBJECTIVE_KEYS = (
     "esca_routing_mean",
+    "tgct_routing_mean",
+    "cesc_routing_mean",
+    "overall_routing_mean",
+)
+CONSTRAINT_METRIC_KEYS = (
+    "esca_routing_mean",
+    "tgct_routing_mean",
     "cesc_routing_mean",
     "overall_routing_mean",
 )
 
+NAIVE_ENV_KEYS = {
+    "TTA_M": "M",
+    "TTA_K_SUB": "K_sub",
+    "TTA_N_STEPS": "n_steps",
+    "TTA_ENTROPY_LOSS_WEIGHT": "entropy_loss_weight",
+    "TTA_PARAM_SCOPE": "tta_param_scope",
+    "TTA_SELECT_MODE": "select_mode",
+    "TTA_NAIVE_USE_TASK_ENTROPY": "naive_use_task_entropy",
+    "TTA_USE_DAPC": "use_dapc",
+    "TTA_LR": "lr",
+    "TTA_L2_ANCHOR_BETA": "l2_anchor_beta",
+    "TTA_TOP_RATIO": "top_ratio",
+    "TTA_ENTROPY_THRESHOLD": "entropy_threshold",
+    "TTA_EMA_ALPHA": "ema_alpha",
+    "TTA_DAPC_LOSS_WEIGHT": "dapc_loss_weight",
+    "TTA_DAPC_TAU_ANCHOR": "dapc_tau_anchor",
+    "TTA_DAPC_BETA": "dapc_beta",
+}
+
+
+def parse_env_scalar(value: str) -> Any:
+    lowered = value.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    try:
+        return int(value)
+    except ValueError:
+        try:
+            return float(value)
+        except ValueError:
+            return value
+
 
 def load_naive_params(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    params = payload.get("params", payload)
+    if path.suffix == ".env":
+        params: dict[str, Any] = {}
+        pattern = re.compile(
+            r'^:\s+"\$\{([A-Z0-9_]+):=([^}]*)\}"\s*$'
+        )
+        for line in path.read_text(encoding="utf-8").splitlines():
+            match = pattern.match(line.strip())
+            if not match or match.group(1) not in NAIVE_ENV_KEYS:
+                continue
+            params[NAIVE_ENV_KEYS[match.group(1)]] = parse_env_scalar(
+                match.group(2)
+            )
+        for bool_key in ("naive_use_task_entropy", "use_dapc"):
+            if bool_key in params:
+                params[bool_key] = bool(int(params[bool_key]))
+    else:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        params = payload.get("params", payload)
     if not isinstance(params, dict):
         raise ValueError(f"Invalid naive parameter file: {path}")
     missing = sorted(REQUIRED_NAIVE_PARAMS - set(params))
@@ -133,21 +197,50 @@ def build_row(
     baseline: dict[str, float],
     baseline_tolerance: float,
 ) -> dict[str, Any]:
-    routing = parse_routing_metrics(trial_dir / "results.csv")
-    esca_mean = routing.get("esca_routing_mean", float("nan"))
-    cesc_mean = routing.get("cesc_routing_mean", float("nan"))
-    overall_mean = routing.get("overall_routing_mean", float("nan"))
+    metrics = parse_trial_metrics(
+        trial_dir / "results.csv", require_class_metrics=True
+    )
+    esca_mean = metrics.get("esca_routing_mean", float("nan"))
+    tgct_mean = metrics.get("tgct_routing_mean", float("nan"))
+    cesc_mean = metrics.get("cesc_routing_mean", float("nan"))
+    overall_mean = metrics.get("overall_routing_mean", float("nan"))
+    bacc_mean = metrics.get("bacc_mean", float("nan"))
+    acc_mean = metrics.get("acc_mean", float("nan"))
     valid_metrics = all(
         math.isfinite(value) and 0.0 <= value <= 1.0
-        for value in (esca_mean, cesc_mean, overall_mean)
+        for value in (
+            esca_mean,
+            tgct_mean,
+            cesc_mean,
+            overall_mean,
+            bacc_mean,
+            acc_mean,
+        )
+    )
+    esca_constraint_met = (
+        valid_metrics
+        and esca_mean
+        > baseline["esca_routing_mean"] - baseline_tolerance
+    )
+    tgct_constraint_met = (
+        valid_metrics
+        and tgct_mean
+        > baseline["tgct_routing_mean"] - baseline_tolerance
+    )
+    cesc_constraint_met = (
+        valid_metrics
+        and cesc_mean
+        > baseline["cesc_routing_mean"] - baseline_tolerance
+    )
+    overall_constraint_met = (
+        valid_metrics
+        and overall_mean > baseline["overall_routing_mean"]
     )
     constraints_met = (
-        valid_metrics
-        and esca_mean >= baseline["esca_routing_mean"] - baseline_tolerance
-        and cesc_mean >= baseline["cesc_routing_mean"] - baseline_tolerance
-    )
-    joint_score = harmonic_mean(
-        (esca_mean, cesc_mean, overall_mean)
+        esca_constraint_met
+        and tgct_constraint_met
+        and cesc_constraint_met
+        and overall_constraint_met
     )
     status = (
         "ok"
@@ -159,12 +252,25 @@ def build_row(
         "setting": setting,
         "mode": "tcp",
         "status": status,
-        "objective": "constrained_routing_harmonic_mean",
-        "objective_value": joint_score,
-        "joint_score": joint_score,
+        "objective": "routing_constrained_bacc",
+        "objective_value": bacc_mean,
+        "bacc_mean": bacc_mean,
+        "acc_mean": acc_mean,
         "constraints_met": constraints_met,
+        "esca_constraint_met": esca_constraint_met,
+        "tgct_constraint_met": tgct_constraint_met,
+        "cesc_constraint_met": cesc_constraint_met,
+        "overall_constraint_met": overall_constraint_met,
         "esca_routing_baseline": baseline["esca_routing_mean"],
+        "tgct_routing_baseline": baseline["tgct_routing_mean"],
         "cesc_routing_baseline": baseline["cesc_routing_mean"],
+        "overall_routing_baseline": baseline["overall_routing_mean"],
+        "esca_routing_delta": esca_mean - baseline["esca_routing_mean"],
+        "tgct_routing_delta": tgct_mean - baseline["tgct_routing_mean"],
+        "cesc_routing_delta": cesc_mean - baseline["cesc_routing_mean"],
+        "overall_routing_delta": (
+            overall_mean - baseline["overall_routing_mean"]
+        ),
         "baseline_tolerance": baseline_tolerance,
         "elapsed_s": elapsed_s if elapsed_s is not None else float("nan"),
         "returncode": returncode,
@@ -172,21 +278,20 @@ def build_row(
         "stderr_log": str(trial_dir / "stderr.log"),
         "result_csv": str(trial_dir / "results.csv"),
         "stderr_tail": stderr[-600:],
-        **routing,
+        **metrics,
         **params,
     }
 
 
-def harmonic_mean(values: tuple[float, ...]) -> float:
-    if not values or any(not math.isfinite(value) or value <= 0 for value in values):
-        return float("nan")
-    return len(values) / sum(1.0 / value for value in values)
-
-
-def parse_routing_metrics(result_csv: Path) -> dict[str, float]:
+def parse_trial_metrics(
+    result_csv: Path,
+    require_class_metrics: bool = False,
+) -> dict[str, float]:
     if not result_csv.exists():
         return {}
-    values: dict[tuple[int, int], float] = {}
+    routing_values: dict[tuple[int, int], float] = {}
+    bacc_values: dict[tuple[int, int], float] = {}
+    acc_values: dict[tuple[int, int], float] = {}
     try:
         with result_csv.open("r", newline="") as handle:
             for row in csv.DictReader(handle):
@@ -199,9 +304,12 @@ def parse_routing_metrics(result_csv: Path) -> dict[str, float]:
                 if row.get("task_name", expected_name) != expected_name:
                     return {}
                 key = (fold, task_id)
-                if key in values:
+                if key in routing_values:
                     return {}
-                values[key] = routing_acc
+                routing_values[key] = routing_acc
+                if require_class_metrics:
+                    bacc_values[key] = float(row["bacc"])
+                    acc_values[key] = float(row["acc"])
     except (KeyError, TypeError, ValueError):
         return {}
 
@@ -210,15 +318,28 @@ def parse_routing_metrics(result_csv: Path) -> dict[str, float]:
         for fold in range(NUM_FOLDS)
         for task_id in range(len(TASK_NAMES))
     }
-    if set(values) != expected:
+    if set(routing_values) != expected:
         return {}
-    if any(not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in values.values()):
+    if require_class_metrics and (
+        set(bacc_values) != expected or set(acc_values) != expected
+    ):
+        return {}
+    all_values = list(routing_values.values())
+    if require_class_metrics:
+        all_values.extend(bacc_values.values())
+        all_values.extend(acc_values.values())
+    if any(
+        not math.isfinite(value) or not 0.0 <= value <= 1.0
+        for value in all_values
+    ):
         return {}
 
     result: dict[str, float] = {}
     task_means: dict[int, float] = {}
     for task_id, task_name in enumerate(TASK_NAMES):
-        fold_values = [values[(fold, task_id)] for fold in range(NUM_FOLDS)]
+        fold_values = [
+            routing_values[(fold, task_id)] for fold in range(NUM_FOLDS)
+        ]
         for fold, value in enumerate(fold_values):
             result[f"fold_{fold}_task_{task_id}_routing_acc"] = value
         task_means[task_id] = sum(fold_values) / NUM_FOLDS
@@ -231,21 +352,56 @@ def parse_routing_metrics(result_csv: Path) -> dict[str, float]:
         )
 
     result["esca_routing_mean"] = task_means[ESCA_TASK_ID]
+    result["tgct_routing_mean"] = task_means[TGCT_TASK_ID]
     result["cesc_routing_mean"] = task_means[CESC_TASK_ID]
     result["overall_routing_mean"] = (
         sum(task_means.values()) / len(TASK_NAMES)
     )
+    if require_class_metrics:
+        for task_id, task_name in enumerate(TASK_NAMES):
+            task_bacc = [
+                bacc_values[(fold, task_id)] for fold in range(NUM_FOLDS)
+            ]
+            task_acc = [
+                acc_values[(fold, task_id)] for fold in range(NUM_FOLDS)
+            ]
+            result[f"task_{task_id}_{task_name.lower()}_bacc_mean"] = (
+                sum(task_bacc) / NUM_FOLDS
+            )
+            result[f"task_{task_id}_{task_name.lower()}_acc_mean"] = (
+                sum(task_acc) / NUM_FOLDS
+            )
+        result["bacc_mean"] = sum(bacc_values.values()) / len(bacc_values)
+        result["acc_mean"] = sum(acc_values.values()) / len(acc_values)
+        fold_bacc_means = [
+            sum(bacc_values[(fold, task_id)] for task_id in range(len(TASK_NAMES)))
+            / len(TASK_NAMES)
+            for fold in range(NUM_FOLDS)
+        ]
+        fold_acc_means = [
+            sum(acc_values[(fold, task_id)] for task_id in range(len(TASK_NAMES)))
+            / len(TASK_NAMES)
+            for fold in range(NUM_FOLDS)
+        ]
+        result["bacc_std"] = math.sqrt(
+            sum((value - result["bacc_mean"]) ** 2 for value in fold_bacc_means)
+            / NUM_FOLDS
+        )
+        result["acc_std"] = math.sqrt(
+            sum((value - result["acc_mean"]) ** 2 for value in fold_acc_means)
+            / NUM_FOLDS
+        )
     return result
 
 
 def load_baseline_metrics(path: Path) -> dict[str, float]:
-    metrics = parse_routing_metrics(path)
+    metrics = parse_trial_metrics(path)
     if not metrics:
         raise ValueError(
             f"Baseline CSV must contain exactly {NUM_FOLDS} folds x "
             f"{len(TASK_NAMES)} tasks of valid routing results: {path}"
         )
-    return {key: metrics[key] for key in OBJECTIVE_KEYS}
+    return {key: metrics[key] for key in CONSTRAINT_METRIC_KEYS}
 
 
 def run_trial(
@@ -278,7 +434,10 @@ def run_trial(
         encoding="utf-8",
     )
 
-    if has_cached_result(result_csv):
+    cached_metrics = parse_trial_metrics(
+        result_csv, require_class_metrics=True
+    )
+    if has_cached_result(result_csv) and cached_metrics:
         stdout_path = trial_dir / "stdout.log"
         stdout = (
             stdout_path.read_text(errors="replace")
@@ -317,7 +476,6 @@ def run_trial(
         str(result_csv),
         "--efficiency_json",
         str(trial_dir / "efficiency.json"),
-        "--tcp_tune_routing_all_folds",
         *params_to_cli(params),
     ]
     print(
@@ -350,9 +508,13 @@ def run_trial(
     print(
         f"[Trial {trial_id:04d}] status={row['status']} "
         f"ESCA={row['esca_routing_mean'] * 100:.4f}% "
+        f"TGCT={row['tgct_routing_mean'] * 100:.4f}% "
         f"CESC={row['cesc_routing_mean'] * 100:.4f}% "
         f"Overall={row['overall_routing_mean'] * 100:.4f}% "
-        f"H={row['joint_score'] * 100:.4f}% "
+        f"bACC={row['bacc_mean'] * 100:.4f}% "
+        f"({row['bacc_std'] * 100:.4f}%) "
+        f"ACC={row['acc_mean'] * 100:.4f}% "
+        f"({row['acc_std'] * 100:.4f}%) "
         f"eligible={row['constraints_met']} "
         f"elapsed={elapsed_s / 60:.1f}m"
     )
@@ -361,7 +523,7 @@ def run_trial(
 
 def metric(row: dict[str, Any]) -> float:
     try:
-        return float(row["joint_score"])
+        return float(row["bacc_mean"])
     except (KeyError, TypeError, ValueError):
         return float("nan")
 
@@ -459,11 +621,17 @@ def write_best(
         row
         for row in rows
         if row.get("status") == "ok"
-        and row.get("objective") == "constrained_routing_harmonic_mean"
+        and row.get("objective") == "routing_constrained_bacc"
         and not math.isnan(metric(row))
         and all(
             math.isfinite(float(row[key]))
-            for key in OBJECTIVE_KEYS
+            for key in (
+                *OBJECTIVE_KEYS,
+                "bacc_mean",
+                "bacc_std",
+                "acc_mean",
+                "acc_std",
+            )
         )
     ]
     if not valid:
@@ -478,12 +646,12 @@ def write_best(
         row
         for row in pareto_rows
         if as_bool(row.get("constraints_met"))
-        and int(row["pareto_rank"]) == 1
     ]
     if not eligible:
         write_rows(output_dir / "constraint_failures.csv", pareto_rows)
         raise ValueError(
-            "No trial satisfies both ESCA and CESC baseline constraints. "
+            "No trial satisfies the ESCA, TGCT, CESC, and overall "
+            "routing baseline constraints. "
             "See constraint_failures.csv; no best trial was selected."
         )
 
@@ -491,9 +659,6 @@ def write_best(
         eligible,
         key=lambda row: (
             metric(row),
-            float(row["cesc_routing_mean"]),
-            float(row["esca_routing_mean"]),
-            float(row["overall_routing_mean"]),
             -int(float(row["trial_id"])),
         ),
         reverse=True,
@@ -517,9 +682,13 @@ def write_best(
     print(
         f"[Random Search TCP] best trial={best['trial_id']} "
         f"ESCA={float(best['esca_routing_mean']) * 100:.4f}% "
+        f"TGCT={float(best['tgct_routing_mean']) * 100:.4f}% "
         f"CESC={float(best['cesc_routing_mean']) * 100:.4f}% "
         f"Overall={float(best['overall_routing_mean']) * 100:.4f}% "
-        f"H={float(best['joint_score']) * 100:.4f}% "
+        f"bACC={float(best['bacc_mean']) * 100:.4f}% "
+        f"({float(best['bacc_std']) * 100:.4f}%) "
+        f"ACC={float(best['acc_mean']) * 100:.4f}% "
+        f"({float(best['acc_std']) * 100:.4f}%) "
         f"ParetoRank={best['pareto_rank']}"
     )
 
@@ -531,6 +700,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--setting", choices=["ind", "ood"], default="ind")
     parser.add_argument("--n_trials", type=int, default=60)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--n_steps", type=int, default=3)
     parser.add_argument("--base_config", required=True)
     parser.add_argument("--merge_dir", required=True)
     parser.add_argument("--finetuned_dir", required=True)
@@ -544,7 +714,10 @@ def parse_args() -> argparse.Namespace:
         "--baseline_tolerance",
         type=float,
         default=0.0,
-        help="Allowed absolute drop for ESCA/CESC routing versus baseline.",
+        help=(
+            "Allowed absolute drop for ESCA/TGCT/CESC routing "
+            "versus baseline; overall routing must strictly improve."
+        ),
     )
     parser.add_argument("--output_dir", default="./logs/tune_tcp")
     parser.add_argument(
@@ -564,6 +737,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout_sec", type=int, default=0)
     parser.add_argument("--top_k", type=int, default=10)
     args = parser.parse_args()
+    if args.n_steps < 1:
+        parser.error("--n_steps must be >= 1")
     args.timeout_sec = args.timeout_sec or None
     if args.baseline_tolerance < 0:
         parser.error("--baseline_tolerance must be >= 0")
@@ -573,6 +748,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     naive_params = load_naive_params(Path(args.naive_params_file))
+    naive_params["n_steps"] = args.n_steps
     output_root = Path(args.output_dir)
     output_dir = output_root / args.setting / "tcp"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -604,8 +780,12 @@ def main() -> None:
     print(f"[Random Search TCP] baseline_csv={baseline_path}")
     print(f"[Random Search TCP] baseline={baseline}")
     print(
-        f"[Random Search TCP] ESCA/CESC tolerance="
+        f"[Random Search TCP] ESCA/TGCT/CESC tolerance="
         f"{args.baseline_tolerance}"
+    )
+    print(
+        "[Random Search TCP] selection=max mean bACC among routing-eligible "
+        "trials"
     )
 
     if args.summarize_only:

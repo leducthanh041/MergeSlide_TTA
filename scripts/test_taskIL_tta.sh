@@ -22,6 +22,14 @@ export MERGESLIDE_LOCAL_ROOT="${MERGESLIDE_LOCAL_ROOT:-/docker/data/$USER_NAME/$
 SETTING="${SETTING:-ind}"
 ORDER="${ORDER:-forward}"
 MODE="${MODE:-}"
+TTA_PARAM_FILE="${TTA_PARAM_FILE:-}"
+if [ -z "$TTA_PARAM_FILE" ]; then
+    if [ "$SETTING" = "ood" ]; then
+        TTA_PARAM_FILE="configs/ood/tta_ood.env"
+    else
+        TTA_PARAM_FILE="configs/ind/tta_ind.env"
+    fi
+fi
 LOG_DIR="${LOG_DIR:-}"
 if [ -n "$LOG_DIR" ] && [[ "$LOG_DIR" != /* && "$LOG_DIR" != logs && "$LOG_DIR" != logs/* ]]; then
     LOG_DIR="logs/$LOG_DIR"
@@ -63,19 +71,6 @@ if [ -n "$MODE" ]; then
     echo "[WARN] MODE=$MODE is ignored for Task-IL TTA because task identity is known." >&2
 fi
 
-TTA_M="${TTA_M:-8}"
-TTA_K_SUB="${TTA_K_SUB:-300}"
-TTA_TOP_RATIO="${TTA_TOP_RATIO:-0.5}"
-TTA_BETA="${TTA_BETA:-1.0}"
-TTA_LR="${TTA_LR:-1e-4}"
-TTA_N_STEPS="${TTA_N_STEPS:-5}"
-TTA_PARAM_SCOPE="${TTA_PARAM_SCOPE:-ln_only}"
-TTA_ENTROPY_THRESHOLD="${TTA_ENTROPY_THRESHOLD:-0.4}"
-TTA_SELECT_MODE="${TTA_SELECT_MODE:-intersection}"
-TTA_VERBOSE_LOSS="${TTA_VERBOSE_LOSS:-1}"
-TTA_IND_BEST_CONFIG="${TTA_IND_BEST_CONFIG:-configs/ind/best_config.json}"
-TTA_OOD_BEST_CONFIG="${TTA_OOD_BEST_CONFIG:-configs/ood/best_config.json}"
-
 if [ -z "${PYTHON_BIN:-}" ]; then
     DEFAULT_PYTHON="/mmlab_students/storageStudents/nguyenvd/anaconda3/envs/mergePre/bin/python3.10"
     if [ -x "$DEFAULT_PYTHON" ]; then
@@ -87,54 +82,26 @@ fi
 
 cd "$PROJECT_ROOT"
 
-# ---------------------------------------------------------------------------
-# Fixed best hyperparameters.
-# Task-IL uses shared TTA knobs from the best config, ignoring Class-IL-only
-# fields such as alpha/gamma/prompt EMA. Missing best config is an error to
-# avoid silently running script defaults after hyperparameter tuning is done.
-# ---------------------------------------------------------------------------
-ACTIVE_BEST_CONFIG=""
-ACTIVE_BEST_LABEL=""
-if [ "$SETTING" = "ind" ]; then
-    ACTIVE_BEST_CONFIG="$TTA_IND_BEST_CONFIG"
-    ACTIVE_BEST_LABEL="IND"
-elif [ "$SETTING" = "ood" ]; then
-    ACTIVE_BEST_CONFIG="$TTA_OOD_BEST_CONFIG"
-    ACTIVE_BEST_LABEL="OOD"
+if [[ "$TTA_PARAM_FILE" != /* ]]; then
+    TTA_PARAM_FILE="$PROJECT_ROOT/$TTA_PARAM_FILE"
 fi
-if [ -n "$ACTIVE_BEST_CONFIG" ]; then
-    if [ ! -f "$ACTIVE_BEST_CONFIG" ]; then
-        echo "[ERROR] ${ACTIVE_BEST_LABEL} best Task-IL TTA config not found: $ACTIVE_BEST_CONFIG" >&2
-        exit 1
-    else
-    eval "$("$PYTHON_BIN" - "$ACTIVE_BEST_CONFIG" <<'PY'
-import json
-import shlex
-import sys
-
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as f:
-    cfg = json.load(f)
-
-mapping = {
-    "M": "TTA_M",
-    "K_sub": "TTA_K_SUB",
-    "top_ratio": "TTA_TOP_RATIO",
-    "beta": "TTA_BETA",
-    "lr": "TTA_LR",
-    "n_steps": "TTA_N_STEPS",
-    "tta_param_scope": "TTA_PARAM_SCOPE",
-    "entropy_threshold": "TTA_ENTROPY_THRESHOLD",
-    "select_mode": "TTA_SELECT_MODE",
-}
-for key, env_name in mapping.items():
-    if key in cfg:
-        print(f"{env_name}={shlex.quote(str(cfg[key]))}")
-PY
-)"
-    echo "[INFO] loaded $ACTIVE_BEST_LABEL best Task-IL TTA config: $ACTIVE_BEST_CONFIG"
-    fi
+if [ ! -f "$TTA_PARAM_FILE" ]; then
+    echo "[ERROR] TTA parameter file not found: $TTA_PARAM_FILE" >&2
+    exit 1
 fi
+# shellcheck source=/dev/null
+source "$TTA_PARAM_FILE"
+
+TTA_M="${TTA_M:-8}"
+TTA_K_SUB="${TTA_K_SUB:-300}"
+TTA_TOP_RATIO="${TTA_TOP_RATIO:-0.5}"
+TTA_BETA="${TTA_BETA:-${TTA_L2_ANCHOR_BETA:-1.0}}"
+TTA_LR="${TTA_LR:-1e-4}"
+TTA_N_STEPS="${TTA_N_STEPS:-5}"
+TTA_PARAM_SCOPE="${TTA_PARAM_SCOPE:-ln_only}"
+TTA_ENTROPY_THRESHOLD="${TTA_ENTROPY_THRESHOLD:-0.4}"
+TTA_TASKIL_SOURCE_ANCHOR_WEIGHT="${TTA_TASKIL_SOURCE_ANCHOR_WEIGHT:-1.0}"
+TTA_VERBOSE_LOSS="${TTA_VERBOSE_LOSS:-1}"
 
 mkdir -p "$MERGESLIDE_LOCAL_ROOT/logs" \
          "$MERGESLIDE_LOCAL_ROOT/checkpoints" \
@@ -176,7 +143,8 @@ echo "[INFO] save_dir=$SAVE_DIR"
 echo "[INFO] merge_model_path=$MERGE_MODEL_PATH"
 echo "[INFO] classil_wrapper=$CLASSIL_WRAPPER"
 echo "[INFO] taskil_tta_entrypoint=$TASKIL_TTA_ENTRYPOINT"
-echo "[INFO] M=$TTA_M | K_sub=$TTA_K_SUB | top_ratio=$TTA_TOP_RATIO | beta=$TTA_BETA | lr=$TTA_LR | n_steps=$TTA_N_STEPS | param_scope=$TTA_PARAM_SCOPE | entropy_threshold=$TTA_ENTROPY_THRESHOLD | select_mode=$TTA_SELECT_MODE | reset=$RESET_LABEL | verbose_loss=$TTA_VERBOSE_LOSS"
+echo "[INFO] tta_param_file=$TTA_PARAM_FILE"
+echo "[INFO] M=$TTA_M | K_sub=$TTA_K_SUB | top_ratio=$TTA_TOP_RATIO | beta=$TTA_BETA | lr=$TTA_LR | n_steps=$TTA_N_STEPS | param_scope=$TTA_PARAM_SCOPE | entropy_threshold=$TTA_ENTROPY_THRESHOLD | selection=class_confidence | taskil_source_anchor_weight=$TTA_TASKIL_SOURCE_ANCHOR_WEIGHT | reset=$RESET_LABEL | verbose_loss=$TTA_VERBOSE_LOSS"
 
 check_log_not_held() {
     local log_path="$1"
@@ -224,7 +192,7 @@ TTA_ARGS=(
     --n_steps           "$TTA_N_STEPS"
     --tta_param_scope   "$TTA_PARAM_SCOPE"
     --entropy_threshold "$TTA_ENTROPY_THRESHOLD"
-    --select_mode       "$TTA_SELECT_MODE"
+    --taskil_source_anchor_weight "$TTA_TASKIL_SOURCE_ANCHOR_WEIGHT"
 )
 if [ "$TTA_VERBOSE_LOSS" = "1" ]; then
     TTA_ARGS+=(--verbose_loss)

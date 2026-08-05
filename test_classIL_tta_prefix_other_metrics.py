@@ -40,8 +40,26 @@ from test_classIL_tta import (
     PROJECT_ROOT,
     build_class_embeddings,
     ensure_local_hot_storage,
+    load_task_prompts_for_tasks,
     resolve_hot_path,
 )
+
+_EXPECTED_TASKS = {
+    "forward": [
+        "BRCA", "RCC", "NSCLC", "ESCA", "TGCT", "CESC",
+    ],
+    "reverse": [
+        "CESC", "TGCT", "ESCA", "NSCLC", "RCC", "BRCA",
+    ],
+}
+_EXPECTED_NUM_CLASSES = {
+    "BRCA": 2,
+    "RCC": 3,
+    "NSCLC": 2,
+    "ESCA": 2,
+    "TGCT": 2,
+    "CESC": 2,
+}
 
 
 def _sample_patches(
@@ -92,6 +110,65 @@ def _load_prefix_backbone_state(
     else:
         ckpt_path = merge_model_path / fold / "merged_final.pth"
     return torch.load(str(ckpt_path), map_location="cpu"), str(ckpt_path)
+
+
+def _validate_six_task_protocol(
+    cfg,
+    seq_dataset,
+    save_dir: Path,
+    merge_model_path: Path,
+    fold_start: int,
+    fold_end: int,
+) -> None:
+    order = str(cfg.dataset.order).lower()
+    if order not in _EXPECTED_TASKS:
+        raise ValueError(
+            f"Unsupported dataset.order={order!r}; expected forward or reverse"
+        )
+
+    expected_tasks = _EXPECTED_TASKS[order]
+    task_names = list(seq_dataset.task_names)
+    num_classes = list(seq_dataset.num_classes)
+    num_tasks = int(cfg.training.num_tasks)
+    if num_tasks != 6 or task_names != expected_tasks:
+        raise ValueError(
+            "The prefix TTA metrics protocol requires the configured 7-task "
+            f"{order} stream {expected_tasks}; got num_tasks={num_tasks}, "
+            f"task_names={task_names}"
+        )
+
+    expected_classes = [_EXPECTED_NUM_CLASSES[name] for name in expected_tasks]
+    if num_classes != expected_classes:
+        raise ValueError(
+            f"Class-count mismatch for {order}: expected {expected_classes}, "
+            f"got {num_classes}"
+        )
+    if len(seq_dataset.task_to_global_class) != num_tasks:
+        raise ValueError(
+            "task_to_global_class must contain one mapping per configured task"
+        )
+
+    missing = []
+    for fold_id in range(fold_start, fold_end):
+        fold = f"fold_{fold_id}"
+        for task_id in range(num_tasks):
+            path = save_dir / fold / f"task_{task_id}.pt"
+            if not path.is_file():
+                missing.append(str(path))
+        for merged_task_id in range(1, num_tasks - 1):
+            path = merge_model_path / fold / f"merged_task_{merged_task_id}.pth"
+            if not path.is_file():
+                missing.append(str(path))
+        final_path = merge_model_path / fold / "merged_final.pth"
+        if not final_path.is_file():
+            missing.append(str(final_path))
+
+    if missing:
+        preview = "\n  ".join(missing[:20])
+        suffix = "" if len(missing) <= 20 else f"\n  ... and {len(missing) - 20} more"
+        raise FileNotFoundError(
+            f"Missing required 7-task prefix checkpoints:\n  {preview}{suffix}"
+        )
 
 
 def _run_task_with_tta(
@@ -206,7 +283,7 @@ def _run_task_with_tta(
         "elapsed_s": float(elapsed_s),
         "routing_acc": (
             float(routing_correct / max(1, len(targets_arr)))
-            if mode == "tcp" else float("nan")
+            if mode == "tcp" else 0.0
         ),
         "adapted": int(adapted),
         "skipped": int(skipped),
@@ -282,6 +359,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["union", "intersection"],
     )
     parser.add_argument("--no_teacher", action="store_true")
+    parser.add_argument(
+        "--tcp_inference_model",
+        choices=["teacher", "student"],
+        default="teacher",
+    )
+    parser.add_argument(
+        "--naive_inference_model",
+        choices=["student", "teacher"],
+        default="student",
+    )
     parser.add_argument("--ema_alpha", type=float, default=0.999)
     parser.add_argument("--no_adapt_prompts", action="store_true")
     parser.add_argument("--ema_alpha_prompt", type=float, default=0.999)
@@ -317,7 +404,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     torch.multiprocessing.set_sharing_strategy("file_system")
     args = build_parser().parse_args()
-    if args.mode == "naive" and not args.use_dapc:
+    if (
+        args.mode == "naive"
+        and args.naive_inference_model == "student"
+        and not args.use_dapc
+    ):
         args.no_teacher = True
 
     local_hot_root = ensure_local_hot_storage()
@@ -333,14 +424,31 @@ def main() -> None:
     seq_dataset = Sequential_Generic_MIL_Dataset(cfg)
     num_tasks = int(cfg.training.num_tasks)
     fold_end = int(cfg.training.num_folds) if args.fold_end < 0 else args.fold_end
+    if not (0 <= args.fold_start < fold_end <= int(cfg.training.num_folds)):
+        raise ValueError(
+            f"Invalid fold range [{args.fold_start}, {fold_end}) for "
+            f"{int(cfg.training.num_folds)} folds"
+        )
 
-    task_prompts_full = torch.load(PROJECT_ROOT / "task_prompts.pt").to(device)
-    if getattr(cfg.dataset, "order", "forward") == "reverse":
-        task_prompts_full = task_prompts_full.flip(0)
+    _validate_six_task_protocol(
+        cfg=cfg,
+        seq_dataset=seq_dataset,
+        save_dir=Path(args.save_dir),
+        merge_model_path=Path(args.merge_model_path),
+        fold_start=args.fold_start,
+        fold_end=fold_end,
+    )
 
-    class_embeddings_full = (
-        build_class_embeddings(device, seq_dataset.task_names)
-        if args.mode == "naive" else None
+    task_prompts_full = load_task_prompts_for_tasks(
+        PROJECT_ROOT / "task_prompts.pt",
+        seq_dataset.task_names,
+        device,
+    )
+
+    # Naive predicts globally; TCP needs the same classifier for its
+    # low-confidence fallback.
+    class_embeddings_full = build_class_embeddings(
+        device, seq_dataset.task_names
     )
 
     print("Loading TITAN base model ...")
@@ -387,11 +495,10 @@ def main() -> None:
             task_model_paths = task_model_paths_full[:seq_task]
             task_weights = load_task_weights(task_model_paths, device)
             task_prompts = task_prompts_full[:seq_task].detach().clone()
-            if args.mode == "naive":
-                class_slice = _prefix_class_columns(seq_dataset.num_classes, seq_task)
-                all_class_embeddings = class_embeddings_full[:, class_slice]
-            else:
-                all_class_embeddings = None
+            class_slice = _prefix_class_columns(
+                seq_dataset.num_classes, seq_task
+            )
+            all_class_embeddings = class_embeddings_full[:, class_slice]
 
             # With only one seen task, task-prompt confidence margin/top2 is not
             # defined. Keep LN-TTA active, but disable prompt/margin add-ons for
@@ -422,6 +529,8 @@ def main() -> None:
                 gamma=args.gamma,
                 select_mode=args.select_mode,
                 use_teacher=(not args.no_teacher),
+                tcp_inference_model=args.tcp_inference_model,
+                naive_inference_model=args.naive_inference_model,
                 ema_alpha=args.ema_alpha,
                 adapt_task_prompts=adapt_task_prompts,
                 ema_alpha_prompt=args.ema_alpha_prompt,

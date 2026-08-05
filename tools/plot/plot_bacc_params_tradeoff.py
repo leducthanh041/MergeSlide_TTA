@@ -2,37 +2,33 @@
 """Plot bACC vs updated parameters from ablation txt files."""
 
 from pathlib import Path
+import argparse
 import os
 import re
 
-import pandas as pd
-
 # Avoid GUI backend/display probing and slow font-cache writes on shared storage.
-os.environ.setdefault("MPLBACKEND", "Agg")
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-mergeSlide")
+os.environ["MPLBACKEND"] = "Agg"
+os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib-mergeSlide"
 
+import pandas as pd
 import matplotlib
 
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 
 
-ROOT = Path("/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/logs/Ablations/trade-off")
-PARAMS_TXT = ROOT / "params.txt" 
-IND_TXT = ROOT / "results_ind.txt"
-OOD_TXT = ROOT / "results_ood.txt"
-
-OUT_PNG = ROOT / "bacc_params_tradeoff_ood.png"
-OUT_PDF = ROOT / "bacc_params_tradeoff_ood.pdf"
+DEFAULT_ROOT = Path("logs/ablation/trade-off")
 
 
 def canonical_method(name: str) -> str:
     name = name.strip().strip('"')
     name = re.sub(r"\s+", " ", name)
     aliases = {
-        "MergeSlide + TTA (ours)": "MergeSlide_TTA",
-        "MergeSlide_TTA": "MergeSlide_TTA",
-        "MergeSlide_TTA (ours)": "MergeSlide_TTA",
+        "CAST-Slide": "CAST-Slide",
+        "CAST-Slide (ours)": "CAST-Slide",
+        "MergeSlide + TTA (ours)": "CAST-Slide",
+        "MergeSlide_TTA": "CAST-Slide",
+        "MergeSlide_TTA (ours)": "CAST-Slide",
         "AdaMerging": "LayerWise AdaMerging++",
         "WEMOE (2 Layer)": "WEMOE",
     }
@@ -41,7 +37,7 @@ def canonical_method(name: str) -> str:
 
 def display_method(name: str) -> str:
     labels = {
-        "MergeSlide_TTA": "MergeSlide_TTA",
+        "CAST-Slide": "CAST-Slide (ours)",
         "LayerWise AdaMerging++": "LayerWise AdaMerging++",
         "AdaRank": "AdaRank",
         "Hi-Vec": "Hi-Vec",
@@ -88,15 +84,9 @@ def read_results(path: Path, setting: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def build_dataframe() -> pd.DataFrame:
-    params_df = read_params(PARAMS_TXT)
-    results_df = pd.concat(
-        [
-            read_results(IND_TXT, "IND"),
-            read_results(OOD_TXT, "OOD"),
-        ],
-        ignore_index=True,
-    )
+def build_dataframe(root: Path) -> pd.DataFrame:
+    params_df = read_params(root / "params.txt")
+    results_df = read_results(root / "results_ood.txt", "OOD")
 
     df = results_df.merge(params_df, on="method", how="left")
     if df["params"].isna().any():
@@ -109,68 +99,68 @@ def build_dataframe() -> pd.DataFrame:
 
 
 STYLE = {
-    "MergeSlide_TTA": {
-        "color": "#ff2d55",
-        "marker": "D",
-        "size": 120,
-        "edge": "black",
-        "lw": 2.1,
-        "z": 10,
+    "CAST-Slide": {
+        "color": "#FFD23F",
+        "marker": "*",
+        "size": 960,
+        "edge": "#D35400",
+        "lw": 2.4,
+        "z": 12,
     },
     "LayerWise AdaMerging++": {
-        "color": "#f2b701",
-        "marker": "h",
-        "size": 145,
-        "edge": "#7a4a00",
-        "lw": 0.9,
-        "z": 4,
+        "color": "#D8C7E8",
+        "marker": "o",
+        "size": 500,
+        "edge": "#5B3A70",
+        "lw": 1.8,
+        "z": 5,
     },
     "AdaRank": {
-        "color": "#9b5de5",
-        "marker": "p",
-        "size": 150,
-        "edge": "#4b237a",
-        "lw": 0.9,
+        "color": "#D28E2C",
+        "marker": "s",
+        "size": 260,
+        "edge": "#704500",
+        "lw": 1.0,
         "z": 4,
     },
     "Hi-Vec": {
-        "color": "#00a6a6",
-        "marker": "8",
-        "size": 155,
-        "edge": "#005f5f",
-        "lw": 0.9,
+        "color": "#3A7D44",
+        "marker": "P",
+        "size": 280,
+        "edge": "#173C1D",
+        "lw": 1.0,
         "z": 4,
     },
     "MINGLE": {
-        "color": "#f97316",
-        "marker": "<",
-        "size": 140,
-        "edge": "#8f3d00",
-        "lw": 0.9,
-        "z": 4,
+        "color": "#B8325A",
+        "marker": "X",
+        "size": 220,
+        "edge": "#5E102A",
+        "lw": 1.2,
+        "z": 7,
     },
     "WEMOE": {
-        "color": "#2ca02c",
+        "color": "#547AA5",
         "marker": ">",
-        "size": 145,
-        "edge": "#145214",
-        "lw": 0.9,
+        "size": 280,
+        "edge": "#263F5B",
+        "lw": 1.0,
         "z": 4,
     },
     "T3": {
-        "color": "#1f4e99",
-        "marker": "d",
-        "size": 155,
-        "edge": "#0b254f",
-        "lw": 0.9,
+        "color": "#85754E",
+        "marker": "<",
+        "size": 270,
+        "edge": "#453A23",
+        "lw": 1.0,
         "z": 4,
     },
     "CONCRETE": {
-        "color": "#8c564b",
-        "marker": "H",
-        "size": 155,
-        "edge": "#4b2a24",
-        "lw": 0.9,
+        "color": "#7A7F87",
+        "marker": "h",
+        "size": 290,
+        "edge": "#363A40",
+        "lw": 1.0,
         "z": 4,
     },
 }
@@ -189,10 +179,10 @@ def plot_one(ax, df: pd.DataFrame, setting: str, show_title: bool = True) -> Non
             yerr=row["bacc_std"],
             fmt="none",
             ecolor=st["color"],
-            elinewidth=1.7,
-            capsize=4,
-            capthick=1.4,
-            alpha=0.85,
+            elinewidth=3.2,
+            capsize=7,
+            capthick=3.0,
+            alpha=1.0,
             zorder=st["z"] - 1,
         )
         ax.scatter(
@@ -209,15 +199,15 @@ def plot_one(ax, df: pd.DataFrame, setting: str, show_title: bool = True) -> Non
 
     ax.set_xscale("symlog", linthresh=1000)
     ax.set_xlim(100, 2_500_000)
-    ax.set_ylim(62.2, 84.5)
+    ax.set_ylim(62.2, 90.5)
     ax.grid(True, which="major", linestyle="--", linewidth=0.7, alpha=0.35)
     ax.grid(True, which="minor", linestyle=":", linewidth=0.5, alpha=0.20)
     if show_title:
         title = {"IND": "In-domain", "OOD": "Out-of-domain"}.get(setting, setting)
         ax.set_title(title, fontsize=12, weight="bold")
-    ax.set_xlabel("Updated parameters (symlog scale)", fontsize=12.6, labelpad=5)
-    ax.set_ylabel("CLASS-IL bACC (%) ± STD", fontsize=14.0, labelpad=7)
-    ax.tick_params(axis="both", labelsize=11.8, width=1.1, length=4.0)
+    ax.set_xlabel("Updated parameters (symlog scale)", fontsize=17, labelpad=8)
+    ax.set_ylabel("CLASS-IL bACC (%) ± STD", fontsize=18, labelpad=9)
+    ax.tick_params(axis="both", labelsize=15, width=1.2, length=4.5)
     ax.set_box_aspect(1)
 
     handles, labels = ax.get_legend_handles_labels()
@@ -226,7 +216,7 @@ def plot_one(ax, df: pd.DataFrame, setting: str, show_title: bool = True) -> Non
         if label not in seen:
             seen[label] = handle
     order = [
-        "MergeSlide_TTA",
+        "CAST-Slide (ours)",
         "LayerWise AdaMerging++",
         "AdaRank",
         "Hi-Vec",
@@ -242,8 +232,8 @@ def plot_one(ax, df: pd.DataFrame, setting: str, show_title: bool = True) -> Non
         title="Method",
         loc="lower left",
         frameon=True,
-        fontsize=8.8,
-        title_fontsize=9.4,
+        fontsize=12.5,
+        title_fontsize=13.5,
         borderpad=0.52,
         labelspacing=0.40,
         handletextpad=0.45,
@@ -251,20 +241,28 @@ def plot_one(ax, df: pd.DataFrame, setting: str, show_title: bool = True) -> Non
         markerscale=0.92,
     )
     for text in legend.get_texts():
-        if text.get_text() == "MergeSlide_TTA":
+        if text.get_text() == "CAST-Slide (ours)":
             text.set_fontweight("bold")
 
 
 def main() -> None:
-    df = build_dataframe()
-    fig, ax = plt.subplots(1, 1, figsize=(4.2, 3.8), constrained_layout=False)
-    fig.subplots_adjust(left=0.18, right=0.98, bottom=0.18, top=0.98)
+    parser = argparse.ArgumentParser(description="Plot the OOD bACC/parameter trade-off.")
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    args = parser.parse_args()
+
+    root = args.root.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    df = build_dataframe(root)
+    fig, ax = plt.subplots(1, 1, figsize=(8.4, 7.2), constrained_layout=False)
+    fig.subplots_adjust(left=0.16, right=0.98, bottom=0.16, top=0.98)
     plot_one(ax, df, "OOD", show_title=False)
 
-    fig.savefig(OUT_PNG, dpi=300, bbox_inches="tight")
-    fig.savefig(OUT_PDF, bbox_inches="tight")
-    print(f"Saved: {OUT_PNG}")
-    print(f"Saved: {OUT_PDF}")
+    out_png = root / "cast_slide_bacc_params_tradeoff_ood.png"
+    out_pdf = root / "cast_slide_bacc_params_tradeoff_ood.pdf"
+    fig.savefig(out_png, dpi=300, bbox_inches="tight")
+    fig.savefig(out_pdf, bbox_inches="tight")
+    print(f"Saved: {out_png}")
+    print(f"Saved: {out_pdf}")
 
 
 if __name__ == "__main__":

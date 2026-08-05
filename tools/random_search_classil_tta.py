@@ -31,7 +31,7 @@ SEARCH_SPACE: dict[str, list[Any]] = {
 FIXED_PARAMS: dict[str, Any] = {
     "M": 8,
     "K_sub": 300,
-    "n_steps": 5,
+    "n_steps": 3,
     "entropy_loss_weight": 1.0,
     "tta_param_scope": "ln_only",
     "select_mode": "intersection",
@@ -395,6 +395,40 @@ def append_row(path: Path, row: dict[str, Any]) -> None:
         writer.writerow(json_safe(row))
 
 
+def read_early_stop_signal(path: Path | None) -> dict[str, Any] | None:
+    if path is None or not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"signal_path": str(path)}
+    return payload if isinstance(payload, dict) else {"signal_path": str(path)}
+
+
+def write_early_stop_signal(
+    path: Path,
+    row: dict[str, Any],
+    threshold: float,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "reason": "ood_bacc_threshold_reached",
+        "created_at": datetime.now().isoformat(),
+        "threshold_percent": threshold,
+        "trial_id": int(row["trial_id"]),
+        "bacc_mean_percent": float(row["bacc_mean"]),
+        "params": {
+            key: row[key]
+            for key in [*FIXED_PARAMS.keys(), *SEARCH_SPACE.keys()]
+        },
+    }
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            json.dump(json_safe(payload), handle, indent=2)
+    except FileExistsError:
+        return
+
+
 def collect_worker_rows(output_root: Path, setting: str) -> list[dict[str, Any]]:
     paths = list(
         output_root.glob(f"gpu*_w*/{setting}/naive/summary_*.csv")
@@ -444,6 +478,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--setting", choices=["ind", "ood"], default="ind")
     parser.add_argument("--n_trials", type=int, default=60)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--n_steps", type=int, default=3)
     parser.add_argument("--base_config", required=True)
     parser.add_argument("--merge_dir", required=True)
     parser.add_argument("--finetuned_dir", required=True)
@@ -464,13 +499,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trial_end", type=int)
     parser.add_argument("--timeout_sec", type=int, default=0)
     parser.add_argument("--top_k", type=int, default=10)
+    parser.add_argument(
+        "--early_stop_bacc",
+        type=float,
+        default=0.0,
+        help=(
+            "Stop scheduling new OOD trials after a successful trial reaches "
+            "this mean bACC percentage. Disabled for IND and values <= 0."
+        ),
+    )
+    parser.add_argument(
+        "--early_stop_signal",
+        default="",
+        help="Shared JSON stop-signal path used by parallel OOD workers.",
+    )
     args = parser.parse_args()
+    if args.n_steps < 1:
+        parser.error("--n_steps must be >= 1")
+    if args.early_stop_bacc < 0:
+        parser.error("--early_stop_bacc must be >= 0")
     args.timeout_sec = args.timeout_sec or None
     return args
 
 
 def main() -> None:
     args = parse_args()
+    FIXED_PARAMS["n_steps"] = args.n_steps
     output_root = Path(args.output_dir)
     output_dir = output_root / args.setting / "naive"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -511,6 +565,20 @@ def main() -> None:
         )
 
     manifest = load_manifest(manifest_path)
+    early_stop_enabled = args.setting == "ood" and args.early_stop_bacc > 0
+    early_stop_signal = (
+        Path(args.early_stop_signal)
+        if early_stop_enabled and args.early_stop_signal
+        else None
+    )
+    if early_stop_enabled and early_stop_signal is None:
+        early_stop_signal = manifest_path.with_suffix(".early_stop.json")
+    if early_stop_enabled:
+        print(
+            f"[Random Search] OOD early stop: "
+            f"bACC>={args.early_stop_bacc:.4f}% "
+            f"signal={early_stop_signal}"
+        )
     trial_end = (
         args.trial_end if args.trial_end is not None else args.n_trials
     )
@@ -519,6 +587,13 @@ def main() -> None:
     )
     rows: list[dict[str, Any]] = []
     for item in manifest[args.trial_start:trial_end]:
+        stop_payload = read_early_stop_signal(early_stop_signal)
+        if stop_payload is not None:
+            print(
+                "[Random Search] stopping before next trial because the "
+                f"shared OOD threshold signal exists: {stop_payload}"
+            )
+            break
         row = run_trial(
             args,
             int(item["trial_id"]),
@@ -526,7 +601,28 @@ def main() -> None:
             output_dir,
         )
         rows.append(row)
+        row["early_stop_bacc_percent"] = (
+            args.early_stop_bacc if early_stop_enabled else float("nan")
+        )
+        row["early_stop_hit"] = bool(
+            early_stop_enabled
+            and row.get("status") == "ok"
+            and math.isfinite(metric(row))
+            and metric(row) >= args.early_stop_bacc
+        )
         append_row(summary_path, row)
+        if row["early_stop_hit"]:
+            write_early_stop_signal(
+                early_stop_signal,
+                row,
+                args.early_stop_bacc,
+            )
+            print(
+                f"[Random Search] EARLY STOP: trial={row['trial_id']} "
+                f"bACC={metric(row):.4f}% >= "
+                f"{args.early_stop_bacc:.4f}%"
+            )
+            break
 
     print(f"[Random Search] worker summary={summary_path}")
     if ranked_rows(rows):

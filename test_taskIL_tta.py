@@ -3,9 +3,9 @@
 Task-IL TTA evaluation (upper bound with adaptation).
 
 Task identity is known at inference time, so:
-  - No task routing (task_prompts not used in loss)
-  - Loss = class-level entropy + diversity over C_task classes only
-  - This is the cleanest TTA setup: pure Information Maximization on correct task
+  - No task routing or task-prompt dependency
+  - Confident sub-bags are selected using class predictions only
+  - Loss = class entropy + class-only source/L2 anchoring
 
 Usage:
     python test_taskIL_tta.py \\
@@ -34,8 +34,6 @@ from mergeslide_tta.tta_adapter import MergeSlide_TTA, load_task_weights
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 HOT_DIR_NAMES = {"checkpoints", "logs", "sqlite"}
-
-
 def get_local_hot_root() -> Path:
     user = os.environ.get("USER") or "thanhld"
     default_root = Path("/docker/data") / user / PROJECT_ROOT.name
@@ -60,11 +58,17 @@ def ensure_local_hot_storage() -> Path:
 
 
 def resolve_hot_path(path: str, local_root: Path) -> Path:
+    def resolve_hot_parts(parts: tuple[str, ...]) -> Path:
+        repo_hot_root = PROJECT_ROOT / parts[0]
+        if repo_hot_root.is_symlink():
+            return repo_hot_root.resolve().joinpath(*parts[1:])
+        return local_root.joinpath(*parts)
+
     raw = Path(path).expanduser()
     if not raw.is_absolute():
         parts = raw.parts
         if parts and parts[0] in HOT_DIR_NAMES:
-            return local_root.joinpath(*parts)
+            return resolve_hot_parts(parts)
         return raw
     try:
         relative = raw.relative_to(PROJECT_ROOT)
@@ -72,7 +76,7 @@ def resolve_hot_path(path: str, local_root: Path) -> Path:
         return raw
     parts = relative.parts
     if parts and parts[0] in HOT_DIR_NAMES:
-        return local_root.joinpath(*parts)
+        return resolve_hot_parts(parts)
     return raw
 
 
@@ -134,8 +138,12 @@ def eval_task_taskil_tta(
         adapted = [d for d in loss_logs if d.get("slide/adapted")]
         if adapted:
             mean_loss = np.mean([d.get("loss/total_with_reg", 0) for d in adapted])
+            mean_source_anchor = np.mean([
+                d.get("loss/taskil_source_anchor", 0) for d in adapted
+            ])
             print(f"    [TTA] task={task_id} adapted={len(adapted)}/{len(loss_logs)} "
-                  f"mean_loss={mean_loss:.4f}")
+                  f"mean_loss={mean_loss:.4f} "
+                  f"source_anchor={mean_source_anchor:.4f}")
 
     return metrics, preds_arr, targets_arr, elapsed_s
 
@@ -158,9 +166,12 @@ if __name__ == "__main__":
                         choices=["ln_only", "full"],
                         help="Backbone parameter scope for TTA.")
     parser.add_argument("--entropy_threshold", type=float, default=0.4)
-    parser.add_argument("--select_mode",       type=str,   default="intersection",
-                        choices=["union", "intersection"],
-                        help="Confident sub-bag selection; intersection matches fixed Class-IL TTA.")
+    parser.add_argument(
+        "--taskil_source_anchor_weight",
+        type=float,
+        default=1.0,
+        help="Weight for Task-IL consistency with the frozen merged source prediction.",
+    )
     parser.add_argument(
         "--episodic",
         action="store_true",
@@ -173,7 +184,6 @@ if __name__ == "__main__":
         default="",
         help="Optional JSON path to save updated params, TTA steps, throughput, and peak VRAM.",
     )
-    # Note: --alpha not exposed for task_il (always 0.0 internally)
     args = parser.parse_args()
     if args.episodic:
         print("[WARN] --episodic is ignored; running continual adaptation without reset.")
@@ -193,12 +203,6 @@ if __name__ == "__main__":
 
     num_tasks   = cfg.training.num_tasks
     seq_dataset = Sequential_Generic_MIL_Dataset(cfg)
-
-    # task_prompts still needed for _quick_inference backbone forward
-    # (task_il mode overrides pred_task but backbone still needs ps)
-    task_prompts = torch.load(PROJECT_ROOT / "task_prompts.pt").to(device)
-    if getattr(cfg.dataset, "order", "forward") == "reverse":
-        task_prompts = task_prompts.flip(0)
 
     print("Loading TITAN base model ...")
     base_model = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
@@ -238,7 +242,7 @@ if __name__ == "__main__":
             # Build TTA model with fixed_task_id for this task
             tta_model = MergeSlide_TTA(
                 backbone          = base_model.vision_encoder,
-                task_prompts      = task_prompts,
+                task_prompts      = None,
                 task_weights      = task_weights,
                 num_classes       = seq_dataset.num_classes,
                 device            = device,
@@ -248,13 +252,12 @@ if __name__ == "__main__":
                 M                 = args.M,
                 K_sub             = args.K_sub,
                 top_ratio         = args.top_ratio,
-                alpha             = 0.0,   # always 0 for task_il
                 l2_anchor_beta    = args.beta,
                 lr                = args.lr,
                 n_steps           = args.n_steps,
                 episodic          = args.episodic,
                 entropy_threshold = args.entropy_threshold,
-                select_mode       = args.select_mode,
+                taskil_source_anchor_weight=args.taskil_source_anchor_weight,
             )
             if efficiency_params is None:
                 efficiency_params = {
@@ -324,7 +327,7 @@ if __name__ == "__main__":
         "mode": "task_il",
         "param_scope": args.tta_param_scope,
         "tta_steps": int(args.n_steps),
-        "select_mode": args.select_mode,
+        "selection": "class_confidence",
         "patches_per_wsi": int(K_PATCHES),
         "subbags": int(args.M),
         "patches_per_subbag": int(args.K_sub),

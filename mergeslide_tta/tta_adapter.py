@@ -119,7 +119,7 @@ class MergeSlide_TTA(nn.Module):
     def __init__(
         self,
         backbone:             nn.Module,
-        task_prompts:         torch.Tensor,
+        task_prompts:         Optional[torch.Tensor],
         task_weights:         List[Dict],
         num_classes:          List[int],
         device:               torch.device,
@@ -141,6 +141,8 @@ class MergeSlide_TTA(nn.Module):
         gamma:                float = 0.5,
         select_mode:          str   = "intersection",
         use_teacher:          bool  = True,
+        tcp_inference_model:  str   = "teacher",
+        naive_inference_model: str  = "student",
         ema_alpha:            float = 0.999,
         adapt_task_prompts:   bool  = True,
         ema_alpha_prompt:     float = 0.999,
@@ -154,6 +156,7 @@ class MergeSlide_TTA(nn.Module):
         entropy_loss_weight:  float = 1.0,
         dapc_tau_anchor:      float = 0.92,
         dapc_beta:            float = 1.2,
+        taskil_source_anchor_weight: float = 0.0,
     ):
         super().__init__()
 
@@ -165,6 +168,17 @@ class MergeSlide_TTA(nn.Module):
         if mode == "task_il":
             assert fixed_task_id is not None, \
                 "fixed_task_id required when mode='task_il'"
+            # Task-IL receives the ground-truth task identity. Keep this path
+            # strictly class-only and avoid constructing unused routing state.
+            alpha = 0.0
+            use_task_diversity = False
+            use_task_agreement = False
+            gamma = 0.0
+            select_mode = "class_only"
+            use_teacher = False
+            adapt_task_prompts = False
+            gamma_margin = 0.0
+            use_dapc = False
         if param_scope not in ("ln_only", "full"):
             raise ValueError(f"param_scope must be 'ln_only' or 'full', got: {param_scope}")
         if l2_anchor_beta < 0:
@@ -173,17 +187,74 @@ class MergeSlide_TTA(nn.Module):
             )
         if use_dapc and not use_teacher:
             raise ValueError("DaPC requires use_teacher=True.")
+        if tcp_inference_model not in ("teacher", "student"):
+            raise ValueError(
+                "tcp_inference_model must be 'teacher' or 'student'."
+            )
+        if mode == "tcp" and tcp_inference_model == "teacher" and not use_teacher:
+            raise ValueError(
+                "TCP teacher inference requires use_teacher=True."
+            )
+        if naive_inference_model not in ("teacher", "student"):
+            raise ValueError(
+                "naive_inference_model must be 'teacher' or 'student'."
+            )
+        if mode == "naive" and naive_inference_model == "teacher" and not use_teacher:
+            raise ValueError(
+                "Naive teacher inference requires use_teacher=True."
+            )
         if dapc_loss_weight < 0 or entropy_loss_weight < 0:
             raise ValueError("DaPC and entropy loss weights must be non-negative.")
+        if taskil_source_anchor_weight < 0:
+            raise ValueError("Task-IL source anchor weight must be non-negative.")
         if not 0.0 <= dapc_tau_anchor <= 1.0:
             raise ValueError("dapc_tau_anchor must be in [0, 1].")
         if dapc_beta <= 0:
             raise ValueError("dapc_beta must be positive.")
+        num_tasks = len(num_classes)
+        if mode != "task_il" and (
+            task_prompts is None
+            or task_prompts.ndim != 2
+            or task_prompts.shape[0] != num_tasks
+        ):
+            shape = None if task_prompts is None else tuple(task_prompts.shape)
+            raise ValueError(
+                "task_prompts must contain one embedding per configured task: "
+                f"expected [{num_tasks}, D], got {shape}"
+            )
+        if len(task_weights) != num_tasks:
+            raise ValueError(
+                "task_weights must contain one head per configured task: "
+                f"expected {num_tasks}, got {len(task_weights)}"
+            )
+        for task_id, (weights, class_count) in enumerate(
+            zip(task_weights, num_classes)
+        ):
+            output_dim = int(weights["weight"].shape[0])
+            if output_dim != class_count:
+                raise ValueError(
+                    f"Task {task_id} head has {output_dim} outputs, expected "
+                    f"{class_count}"
+                )
+        if (
+            all_class_embeddings is not None
+            and (
+                all_class_embeddings.ndim != 2
+                or all_class_embeddings.shape[1] != sum(num_classes)
+            )
+        ):
+            raise ValueError(
+                "all_class_embeddings must contain every configured class: "
+                f"expected [D, {sum(num_classes)}], got "
+                f"{tuple(all_class_embeddings.shape)}"
+            )
         self.param_scope          = param_scope
         self.backbone             = configure_backbone_for_tta(backbone, param_scope)
         self.device               = device
         self.mode                 = mode
-        self.task_prompts         = task_prompts.to(device)
+        self.task_prompts         = (
+            task_prompts.to(device) if task_prompts is not None else None
+        )
         self.task_weights         = task_weights
         self.num_classes          = num_classes
         self.all_class_embeddings = (
@@ -205,11 +276,13 @@ class MergeSlide_TTA(nn.Module):
         self.use_task_agreement   = use_task_agreement
         self.gamma                = gamma
         self.select_mode          = select_mode
-        assert select_mode in ("union", "intersection"), \
-            f"select_mode must be 'union' or 'intersection', got: {select_mode}"
+        assert select_mode in ("union", "intersection", "class_only"), \
+            f"unsupported select_mode: {select_mode}"
         self.ps                   = torch.tensor(TITAN_PS_ARG).int().to(device)
 
         self.use_teacher          = use_teacher
+        self.tcp_inference_model  = tcp_inference_model
+        self.naive_inference_model = naive_inference_model
         self.ema_alpha            = ema_alpha
         self.adapt_task_prompts   = adapt_task_prompts
         self.ema_alpha_prompt     = ema_alpha_prompt
@@ -221,9 +294,13 @@ class MergeSlide_TTA(nn.Module):
         self.entropy_loss_weight = entropy_loss_weight
         self.dapc_tau_anchor     = dapc_tau_anchor
         self.dapc_beta           = dapc_beta
+        self.taskil_source_anchor_weight = taskil_source_anchor_weight
 
         # task_prompts becomes mutable (working copy) + frozen source anchor
-        self.task_prompts_source  = self.task_prompts.detach().clone()
+        self.task_prompts_source = (
+            self.task_prompts.detach().clone()
+            if self.task_prompts is not None else None
+        )
         # self.task_prompts (set above) is now the *working* copy, updated
         # in-place at Phase 5b if adapt_task_prompts=True.
 
@@ -238,9 +315,11 @@ class MergeSlide_TTA(nn.Module):
         else:
             self.teacher = None
 
-        # DaPC compares the current teacher with an immutable source model.
-        # Create it only for DaPC to avoid baseline VRAM cost.
-        if self.use_dapc:
+        # DaPC and Task-IL source anchoring require an immutable source model.
+        needs_anchor = self.use_dapc or (
+            self.mode == "task_il" and self.taskil_source_anchor_weight > 0
+        )
+        if needs_anchor:
             self.anchor = deepcopy(backbone).to(device)
             self.anchor.eval()
             for p in self.anchor.parameters():
@@ -279,24 +358,56 @@ class MergeSlide_TTA(nn.Module):
         self.total_params = n_total
         self.update_ratio = n_trainable / max(n_total, 1)
         reset_label = "episodic_per_slide" if episodic else "continual"
-        print(
+        if mode == "tcp" and tcp_inference_model == "teacher":
+            teacher_role = "ema_inference"
+        elif mode == "tcp" and use_teacher:
+            teacher_role = "ema_adaptation_only"
+        elif mode == "naive" and naive_inference_model == "teacher":
+            teacher_role = "ema_inference"
+        elif mode == "naive" and use_dapc:
+            teacher_role = "dapc_target_only"
+        else:
+            teacher_role = "disabled"
+        config_log = (
             f"[MergeSlide_TTA] {mode_info} | LN layers={num_ln} | "
             f"param_scope={param_scope} | trainable_params={n_trainable:,}/{n_total:,} | "
             f"M={M} sub-bags | K_sub={K_sub} | "
-            f"top_ratio={top_ratio} | alpha={alpha} | "
+            f"top_ratio={top_ratio} | "
             f"regularizer=l2_anchor | l2_anchor_beta={l2_anchor_beta} | "
             f"lr={lr} | n_steps={n_steps} | reset={reset_label} | "
             f"entropy_threshold={entropy_threshold} | "
-            f"select_mode={select_mode} | use_task_diversity={use_task_diversity} | "
-            f"use_task_agreement={use_task_agreement} | gamma={gamma} | "
-            f"use_teacher={use_teacher} | ema_alpha={ema_alpha} | "
-            f"adapt_task_prompts={adapt_task_prompts} | ema_alpha_prompt={ema_alpha_prompt} | "
-            f"delta_margin={delta_margin} | tp_anchor_beta={tp_anchor_beta} | "
-            f"gamma_margin={gamma_margin} | tau_task={tau_task} | "
-            f"naive_use_task_entropy={naive_use_task_entropy} | "
-            f"use_dapc={use_dapc} | dapc_weight={dapc_loss_weight} | "
             f"entropy_weight={entropy_loss_weight}"
         )
+        if mode == "task_il":
+            config_log += (
+                " | selection=class_confidence"
+                f" | taskil_source_anchor_weight={taskil_source_anchor_weight}"
+            )
+        elif mode == "tcp":
+            config_log += (
+                f" | alpha={alpha}"
+                f" | select_mode={select_mode}"
+                f" | use_task_diversity={use_task_diversity}"
+                f" | use_task_agreement={use_task_agreement}"
+                f" | gamma={gamma}"
+                f" | teacher_role={teacher_role}"
+                f" | ema_alpha={ema_alpha}"
+                f" | adapt_task_prompts={adapt_task_prompts}"
+                f" | ema_alpha_prompt={ema_alpha_prompt}"
+                f" | delta_margin={delta_margin}"
+                f" | tp_anchor_beta={tp_anchor_beta}"
+                f" | gamma_margin={gamma_margin}"
+                f" | tau_task={tau_task}"
+                f" | tcp_inference_model={tcp_inference_model}"
+                f" | use_dapc={use_dapc}"
+                f" | dapc_weight={dapc_loss_weight}"
+            )
+        else:
+            config_log += (
+                f" | naive_use_task_entropy={naive_use_task_entropy}"
+                f" | teacher_role={teacher_role}"
+            )
+        print(config_log)
 
     # -----------------------------------------------------------------------
     # Sub-bag creation
@@ -522,6 +633,8 @@ class MergeSlide_TTA(nn.Module):
 
     def reset_task_prompts(self):
         """Reset task prompts to source to prevent cross-task drift."""
+        if self.task_prompts is None:
+            return
         with torch.no_grad():
             self.task_prompts.copy_(self.task_prompts_source)
         self.n_prompt_updates = {}
@@ -536,12 +649,19 @@ class MergeSlide_TTA(nn.Module):
         features: torch.Tensor,
         coords: torch.Tensor,
         anchor_embedding: Optional[torch.Tensor] = None,
+        taskil_source_target: Optional[torch.Tensor] = None,
     ) -> dict:
         feat_list, coord_list = self._make_subbags(features, coords)
         embeds = self._forward_subbags(feat_list, coord_list)   # [M, 768]
         task_logits = (
             None
-            if self.mode == "naive" and not self.naive_use_task_entropy
+            if (
+                self.mode == "task_il"
+                or (
+                    self.mode == "naive"
+                    and not self.naive_use_task_entropy
+                )
+            )
             else embeds.float() @ self.task_prompts.T.detach()
         )
 
@@ -565,7 +685,7 @@ class MergeSlide_TTA(nn.Module):
             class_logits = self._class_logits_naive(embeds)
             tcp_reliable = True
 
-        if self.mode == "naive" and not self.naive_use_task_entropy:
+        if task_logits is None:
             _, sel_idx = select_confident_subbags(
                 class_logits.detach(), self.top_ratio
             )
@@ -578,33 +698,48 @@ class MergeSlide_TTA(nn.Module):
             _, idx_task  = select_confident_subbags(task_logits.detach(),  self.top_ratio)
             sel_idx      = torch.unique(torch.cat([idx_class, idx_task]))
 
-        # Loss mode:
-        #   tcp     : class entropy + class diversity + alpha * (task entropy + agreement)
-        #   naive   : class entropy only (alpha=0, no diversity over 13 classes)
-        #   task_il : class entropy + class diversity only (alpha=0, task routing irrelevant)
-        if self.mode == "naive":
+        if self.mode == "task_il":
+            loss = entropy_loss(class_logits[sel_idx])
+            log = {
+                "loss/class_ent": loss.item(),
+                "loss/total": loss.item(),
+            }
+        elif self.mode == "naive":
             effective_alpha = 0.0
             use_task_div    = False
             use_task_agree  = False
-        elif self.mode == "task_il":
-            effective_alpha = 0.0    # no task loss, task is already known
-            use_task_div    = False
-            use_task_agree  = False
-        else:  # tcp
-            effective_alpha = self.alpha
-            use_task_div    = self.use_task_diversity   # default False (bug fixed)
-            use_task_agree  = self.use_task_agreement
-
-        loss, log = dual_level_tta_loss(
-            class_logits[sel_idx],
-            None if task_logits is None else task_logits[sel_idx],
-            effective_alpha,
-            use_task_diversity=use_task_div,
-            use_task_agreement=use_task_agree,
-            gamma=self.gamma,
-        )
+            loss, log = dual_level_tta_loss(
+                class_logits[sel_idx],
+                None if task_logits is None else task_logits[sel_idx],
+                effective_alpha,
+                use_task_diversity=use_task_div,
+                use_task_agreement=use_task_agree,
+                gamma=self.gamma,
+            )
+        else:
+            loss, log = dual_level_tta_loss(
+                class_logits[sel_idx],
+                task_logits[sel_idx],
+                self.alpha,
+                use_task_diversity=self.use_task_diversity,
+                use_task_agreement=self.use_task_agreement,
+                gamma=self.gamma,
+            )
         loss = self.entropy_loss_weight * loss
         log["loss/entropy_objective"] = loss.item()
+
+        if self.mode == "task_il" and self.taskil_source_anchor_weight > 0:
+            if taskil_source_target is None:
+                raise RuntimeError("Task-IL source target is required for anchoring.")
+            source_anchor_loss = self._soft_cross_entropy(
+                class_logits[sel_idx], taskil_source_target
+            )
+            loss = loss + (
+                self.taskil_source_anchor_weight * source_anchor_loss
+            )
+        else:
+            source_anchor_loss = class_logits.new_zeros(())
+        log["loss/taskil_source_anchor"] = source_anchor_loss.item()
         if self.mode == "naive" and self.naive_use_task_entropy:
             # Match the original ablation: task entropy is diagnostic only
             # (alpha remains zero), but task confidence guides view selection.
@@ -685,27 +820,37 @@ class MergeSlide_TTA(nn.Module):
         No-grad forward with full K patches.
         Returns (pred_class, probs[1,C], pred_task, entropy_value).
 
-        When use_teacher=True, routing and final class prediction
-        use the EMA teacher (stable) instead of the backbone currently
-        receiving gradient updates.
+        TCP and naive independently select the student or EMA teacher for
+        final prediction. Task-IL uses the student backbone. A teacher owned
+        by naive mode may also construct detached DaPC targets.
         Also routes against the CURRENT (possibly EMA-updated) task_prompts,
         not the frozen source.
         """
-        model = (
-            self.teacher
-            if self.use_teacher and self.mode == "tcp"
-            else self.backbone
-        )
+        if (
+            self.mode == "tcp"
+            and self.tcp_inference_model == "teacher"
+        ) or (
+            self.mode == "naive"
+            and self.naive_inference_model == "teacher"
+        ):
+            model = self.teacher
+        else:
+            model = self.backbone
         was_training = model.training
         model.eval()
         with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
-            z           = model(features, coords, self.ps)
-            task_logits = z.float() @ self.task_prompts.T
-            task_probs = F.softmax(task_logits, dim=1)
-            tcp_conf, routed_task = task_probs.max(dim=1)
-            self.last_tcp_conf = float(tcp_conf.item())
+            z = model(features, coords, self.ps)
             self.last_tcp_fallback = False
-            pred_task = int(routed_task.item())
+
+            if self.mode == "task_il":
+                self.last_tcp_conf = float("nan")
+                pred_task = self.fixed_task_id
+            else:
+                task_logits = z.float() @ self.task_prompts.T
+                task_probs = F.softmax(task_logits, dim=1)
+                tcp_conf, routed_task = task_probs.max(dim=1)
+                self.last_tcp_conf = float(tcp_conf.item())
+                pred_task = int(routed_task.item())
 
             if self.mode == "tcp":
                 if float(tcp_conf.item()) >= self.tau_task:
@@ -729,8 +874,6 @@ class MergeSlide_TTA(nn.Module):
                         model.train()
                     return pred_class, probs.cpu(), pred_task, entropy
             elif self.mode == "task_il":
-                # Use fixed task -- override pred_task with known identity
-                pred_task    = self.fixed_task_id
                 class_logits = self._class_logits_tcp(z.float(), pred_task)
             else:
                 class_logits = self._class_logits_naive(z.float())
@@ -787,11 +930,22 @@ class MergeSlide_TTA(nn.Module):
         self.backbone.train()
 
         anchor_embedding = None
-        if self.use_dapc:
+        taskil_source_target = None
+        needs_anchor_forward = self.use_dapc or (
+            self.mode == "task_il" and self.taskil_source_anchor_weight > 0
+        )
+        if needs_anchor_forward:
             with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.bfloat16):
                 anchor_embedding = self.anchor(
                     features, coords, self.ps
                 ).float()
+                if self.mode == "task_il":
+                    anchor_logits = self._class_logits_tcp(
+                        anchor_embedding, self.fixed_task_id
+                    )
+                    taskil_source_target = F.softmax(
+                        anchor_logits.float(), dim=-1
+                    ).detach()
 
         step_logs = []
         for _ in range(self.n_steps):
@@ -800,6 +954,7 @@ class MergeSlide_TTA(nn.Module):
                     features,
                     coords,
                     anchor_embedding=anchor_embedding,
+                    taskil_source_target=taskil_source_target,
                 )
             )
 

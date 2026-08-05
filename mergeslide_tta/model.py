@@ -57,10 +57,7 @@ def build_model(task_id: int, num_classes: int, prompt_classifier: torch.Tensor,
     return CustomSequential(titan, mlp).to(device)
 
 
-def build_prompt_classifier(
-    device: str,
-    include_external_tasks: bool = False,
-) -> tuple[torch.Tensor, list]:
+def build_prompt_classifier(device: str) -> tuple[torch.Tensor, list]:
     """
     Build the 13-class zero-shot classifier from TITAN's text encoder.
     Returns (classifier_tensor [EMBED_DIM, 13], templates).
@@ -69,7 +66,6 @@ def build_prompt_classifier(
     from mergeslide_tta.prompts_zeroshot import (
         brca_prompts, rcc_prompts, nsclc_prompts,
         esca_prompts, tgct_prompts, cesc_prompts,
-        bracs_prompts, herohe_prompts,
     )
 
     titan = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
@@ -81,9 +77,6 @@ def build_prompt_classifier(
         brca_prompts, rcc_prompts, nsclc_prompts,
         esca_prompts, tgct_prompts, cesc_prompts,
     ]
-    if include_external_tasks:
-        prompt_functions.extend([bracs_prompts, herohe_prompts])
-
     for fn in prompt_functions:
         class_prompts, _ = fn()
         all_prompts.extend(class_prompts)

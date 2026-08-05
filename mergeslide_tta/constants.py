@@ -3,7 +3,7 @@ Shared constants used across training, merging, and evaluation.
 All task-specific configurations are defined here once.
 """
 
-# Total number of sequential tasks (TCGA cohorts)
+# Total number of sequential tasks in the active forward sequence.
 NUM_TASKS: int = 6
 
 # Number of classes per task
@@ -46,7 +46,9 @@ TASK_TO_GLOBAL_CLASS: dict[int, dict[int, int]] = {
 }
 
 # Task names for logging
-TASK_NAMES: list[str] = ["BRCA", "RCC", "NSCLC", "ESCA", "TGCT", "CESC"]
+TASK_NAMES: list[str] = [
+    "BRCA", "RCC", "NSCLC", "ESCA", "TGCT", "CESC",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +89,6 @@ TASK_TO_GLOBAL_CLASS_REVERSE: dict[int, dict[int, int]] = {
     4: {0: 8,  1: 9,  2: 10},
     5: {0: 11, 1: 12},
 }
-
 
 # ---------------------------------------------------------------------------
 # Helper

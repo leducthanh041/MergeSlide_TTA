@@ -3,15 +3,15 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import re
 from pathlib import Path
 
+os.environ["MPLBACKEND"] = "Agg"
+os.environ["MPLCONFIGDIR"] = "/tmp/matplotlib-mergeSlide"
+
 import pandas as pd
-
-os.environ.setdefault("MPLBACKEND", "Agg")
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-mergeSlide")
-
 import matplotlib
 
 matplotlib.use("Agg", force=True)
@@ -20,80 +20,79 @@ from matplotlib.ticker import MaxNLocator
 from matplotlib.patches import Ellipse
 
 
-ROOT = Path("/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA/logs/Ablations/trade-off")
-INPUT_TXT = ROOT / "accuracy-fgt-bwt.txt"
+DEFAULT_ROOT = Path("logs/ablation/trade-off")
 
 
 STYLE = {
-    "MergeSlide_TTA": {
-        "color": "#ff2d55",
-        "marker": "D",
-        "size": 115,
-        "edge": "black",
-        "lw": 2.0,
-        "z": 10,
+    "CAST-Slide": {
+        "color": "#FFD23F",
+        "marker": "*",
+        "size": 960,
+        "edge": "#D35400",
+        "lw": 2.4,
+        "z": 12,
     },
     "LayerWise AdaMerging++": {
-        "color": "#f2b701",
-        "marker": "h",
-        "size": 135,
-        "edge": "#7a4a00",
-        "lw": 0.9,
-        "z": 4,
+        "color": "#D8C7E8",
+        "marker": "o",
+        "size": 500,
+        "edge": "#5B3A70",
+        "lw": 1.8,
+        "z": 5,
     },
     "AdaRank": {
-        "color": "#9b5de5",
-        "marker": "p",
-        "size": 140,
-        "edge": "#4b237a",
-        "lw": 0.9,
+        "color": "#D28E2C",
+        "marker": "s",
+        "size": 260,
+        "edge": "#704500",
+        "lw": 1.0,
         "z": 4,
     },
     "Hi-Vec": {
-        "color": "#00a6a6",
-        "marker": "8",
-        "size": 145,
-        "edge": "#005f5f",
-        "lw": 0.9,
+        "color": "#3A7D44",
+        "marker": "P",
+        "size": 280,
+        "edge": "#173C1D",
+        "lw": 1.0,
         "z": 4,
     },
     "MINGLE": {
-        "color": "#f97316",
-        "marker": "<",
-        "size": 135,
-        "edge": "#8f3d00",
-        "lw": 0.9,
-        "z": 4,
+        "color": "#B8325A",
+        "marker": "X",
+        "size": 220,
+        "edge": "#5E102A",
+        "lw": 1.2,
+        "z": 7,
     },
     "WEMOE": {
-        "color": "#2ca02c",
+        "color": "#547AA5",
         "marker": ">",
-        "size": 140,
-        "edge": "#145214",
-        "lw": 0.9,
+        "size": 280,
+        "edge": "#263F5B",
+        "lw": 1.0,
         "z": 4,
     },
     "CONCRETE": {
-        "color": "#8c564b",
-        "marker": "H",
-        "size": 145,
-        "edge": "#4b2a24",
-        "lw": 0.9,
+        "color": "#7A7F87",
+        "marker": "h",
+        "size": 290,
+        "edge": "#363A40",
+        "lw": 1.0,
         "z": 4,
     },
     "T3": {
-        "color": "#1f77b4",
-        "marker": "s",
-        "size": 128,
-        "edge": "#0d3f67",
-        "lw": 0.9,
+        "color": "#85754E",
+        "marker": "<",
+        "size": 270,
+        "edge": "#453A23",
+        "lw": 1.0,
         "z": 4,
     },
 }
 
 
 ORDER = [
-    "MergeSlide_TTA",
+    "CAST-Slide",
     "LayerWise AdaMerging++",
     "AdaRank",
     "Hi-Vec",
@@ -107,9 +106,12 @@ ORDER = [
 def canonical_method(name: str) -> str:
     name = re.sub(r"\s+", " ", name.strip())
     aliases = {
-        "MergeSlide + TTA": "MergeSlide_TTA",
-        "MergeSlide + TTA (ours)": "MergeSlide_TTA",
-        "MergeSlide_TTA (ours)": "MergeSlide_TTA",
+        "CAST-Slide": "CAST-Slide",
+        "CAST-Slide (ours)": "CAST-Slide",
+        "MergeSlide + TTA": "CAST-Slide",
+        "MergeSlide + TTA (ours)": "CAST-Slide",
+        "MergeSlide_TTA": "CAST-Slide",
+        "MergeSlide_TTA (ours)": "CAST-Slide",
         "WEMOE (2 Layer)": "WEMOE",
         "WEMOE (2 layers)": "WEMOE",
     }
@@ -117,6 +119,8 @@ def canonical_method(name: str) -> str:
 
 
 def display_method(name: str) -> str:
+    if name == "CAST-Slide":
+        return "CAST-Slide (ours)"
     if name == "WEMOE":
         return "WEMOE (2 layers)"
     return name
@@ -161,8 +165,9 @@ def add_uncertainty_ellipse(ax, x: float, y: float, x_std: float, y_std: float, 
         width=max(2.0 * x_std, 0.15),
         height=max(2.0 * y_std, 0.15),
         facecolor=color,
-        edgecolor="none",
-        alpha=0.16,
+        edgecolor=color,
+        linewidth=1.2,
+        alpha=0.18,
         zorder=zorder,
     )
     ax.add_patch(ellipse)
@@ -188,10 +193,10 @@ def draw_points(ax, df: pd.DataFrame, x_col: str, x_std_col: str, *, include_lab
             yerr=y_std,
             fmt="none",
             ecolor=st["color"],
-            elinewidth=1.55 * scale,
-            capsize=3.5 * scale,
-            capthick=1.25 * scale,
-            alpha=0.82,
+            elinewidth=3.2 * scale,
+            capsize=7 * scale,
+            capthick=3.0 * scale,
+            alpha=1.0,
             zorder=st["z"] - 1,
         )
         ax.scatter(
@@ -230,17 +235,24 @@ def full_limits(df: pd.DataFrame, x_col: str, x_std_col: str) -> tuple[tuple[flo
     return (x_min - x_pad, x_max + x_pad), (y_min - y_pad, y_max + y_pad)
 
 
-def plot_tradeoff(df: pd.DataFrame, x_col: str, x_std_col: str, xlabel: str, out_stem: str) -> None:
-    fig, ax = plt.subplots(figsize=(4.25, 3.85), constrained_layout=False)
-    fig.subplots_adjust(left=0.17, right=0.98, bottom=0.16, top=0.98)
+def plot_tradeoff(
+    df: pd.DataFrame,
+    root: Path,
+    x_col: str,
+    x_std_col: str,
+    xlabel: str,
+    out_stem: str,
+) -> None:
+    fig, ax = plt.subplots(figsize=(8.4, 7.2), constrained_layout=False)
+    fig.subplots_adjust(left=0.16, right=0.98, bottom=0.16, top=0.98)
 
     draw_points(ax, df, x_col, x_std_col)
 
     ax.grid(True, which="major", linestyle="--", linewidth=0.7, alpha=0.35)
     ax.grid(True, which="minor", linestyle=":", linewidth=0.45, alpha=0.20)
-    ax.set_xlabel(xlabel, fontsize=14.0, labelpad=6)
-    ax.set_ylabel("Mean CLASS-IL ACC (%) ± STD", fontsize=14.0, labelpad=7)
-    ax.tick_params(axis="both", labelsize=11.8, width=1.1, length=4.0)
+    ax.set_xlabel(xlabel, fontsize=20, labelpad=8)
+    ax.set_ylabel("Mean CLASS-IL ACC (%) ± STD", fontsize=20, labelpad=9)
+    ax.tick_params(axis="both", labelsize=15, width=1.2, length=4.5)
     ax.set_box_aspect(1)
 
     xlim, ylim = full_limits(df, x_col, x_std_col)
@@ -269,8 +281,8 @@ def plot_tradeoff(df: pd.DataFrame, x_col: str, x_std_col: str, xlabel: str, out
         title="Method",
         loc=legend_loc,
         frameon=True,
-        fontsize=8.8,
-        title_fontsize=9.4,
+        fontsize=12.5,
+        title_fontsize=13.5,
         borderpad=0.50,
         labelspacing=0.38,
         handletextpad=0.42,
@@ -279,11 +291,11 @@ def plot_tradeoff(df: pd.DataFrame, x_col: str, x_std_col: str, xlabel: str, out
         ncol=1,
     )
     for text in legend.get_texts():
-        if text.get_text() == "MergeSlide_TTA":
+        if text.get_text() == "CAST-Slide (ours)":
             text.set_fontweight("bold")
 
-    out_png = ROOT / f"{out_stem}.png"
-    out_pdf = ROOT / f"{out_stem}.pdf"
+    out_png = root / f"{out_stem}.png"
+    out_pdf = root / f"{out_stem}.pdf"
     fig.savefig(out_png, dpi=300, bbox_inches="tight")
     fig.savefig(out_pdf, bbox_inches="tight")
     print(f"Saved: {out_png}")
@@ -291,10 +303,30 @@ def plot_tradeoff(df: pd.DataFrame, x_col: str, x_std_col: str, xlabel: str, out
 
 
 def main() -> None:
-    df = read_results(INPUT_TXT)
+    parser = argparse.ArgumentParser(description="Plot OOD ACC/FGT and ACC/BWT trade-offs.")
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    args = parser.parse_args()
+
+    root = args.root.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    df = read_results(root / "accuracy-fgt-bwt.txt")
     print(df[["method", "acc_mean", "acc_std", "fgt_mean", "fgt_std", "bwt_mean", "bwt_std"]].to_string(index=False))
-    plot_tradeoff(df, "fgt_mean", "fgt_std", "Forgetting (± STD)", "accuracy_fgt_tradeoff")
-    plot_tradeoff(df, "bwt_mean", "bwt_std", "Backward Transfer (± STD)", "accuracy_bwt_tradeoff")
+    plot_tradeoff(
+        df,
+        root,
+        "fgt_mean",
+        "fgt_std",
+        "Forgetting (± STD)",
+        "cast_slide_accuracy_fgt_tradeoff_ood",
+    )
+    plot_tradeoff(
+        df,
+        root,
+        "bwt_mean",
+        "bwt_std",
+        "Backward Transfer (± STD)",
+        "cast_slide_accuracy_bwt_tradeoff_ood",
+    )
 
 
 if __name__ == "__main__":

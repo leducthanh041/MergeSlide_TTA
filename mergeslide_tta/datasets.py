@@ -18,7 +18,10 @@ import h5py
 import torch.nn.functional as F
 import numpy as np
 from typing import Tuple
-from mergeslide_tta.constants import get_order_constants, CLASSIFIER_CLASS_RANGES_FORWARD
+from mergeslide_tta.constants import (
+    CLASSIFIER_CLASS_RANGES_FORWARD,
+    get_order_constants,
+)
 
 
 def get_wsi_loader_kwargs(config_workers: int = 0) -> dict:
@@ -457,7 +460,7 @@ class Generic_MIL_Dataset(Generic_WSI_Classification_Dataset):
             features = torch.from_numpy(features)
         except:
             pass
-            
+
         coords = torch.from_numpy(coords)
         return (features, coords, label)
 
@@ -504,83 +507,6 @@ class Generic_MIL_Dataset2_Split:
         features = torch.from_numpy(features)
         coords = torch.from_numpy(coords)
         return (features, coords, label)
-
-
-class Generic_HEROHE_MIL_Dataset:
-    """HEROHE split loader for source-specific feature and coordinate roots."""
-
-    def __init__(self, train_coords, train_features, test_coords, test_features):
-        self.coords_dirs = {
-            "train": str(train_coords),
-            "test": str(test_coords),
-        }
-        self.feature_dirs = {
-            "train": str(train_features),
-            "test": str(test_features),
-        }
-
-    def return_splits(self, from_id=False, csv_path=None):
-        if from_id or not csv_path:
-            raise ValueError("HEROHE requires a CLAM-format split CSV")
-        slide_data = pd.read_csv(csv_path, index_col=0)
-        splits = []
-        for split_name in ("train", "val", "test"):
-            slides = slide_data[split_name].dropna().astype(str).tolist()
-            labels = (
-                slide_data[f"{split_name}_label"].dropna().astype(int).tolist()
-            )
-            if len(slides) != len(labels):
-                raise ValueError(
-                    f"HEROHE {split_name}: {len(slides)} slides but "
-                    f"{len(labels)} labels in {csv_path}"
-                )
-            splits.append(
-                Generic_HEROHE_MIL_Split(
-                    self.coords_dirs,
-                    self.feature_dirs,
-                    slides,
-                    labels,
-                )
-            )
-        return tuple(splits)
-
-
-class Generic_HEROHE_MIL_Split(Dataset):
-    def __init__(self, coords_dirs, feature_dirs, slides, labels):
-        self.coords_dirs = coords_dirs
-        self.feature_dirs = feature_dirs
-        self.slides = slides
-        self.labels = labels
-
-    def __len__(self):
-        return len(self.slides)
-
-    @staticmethod
-    def _load_pt(path):
-        try:
-            return torch.load(path, map_location="cpu", weights_only=True)
-        except TypeError:
-            return torch.load(path, map_location="cpu")
-
-    def __getitem__(self, idx):
-        slide_id = self.slides[idx]
-        source, source_id = slide_id.split("_", 1)
-        if source not in self.coords_dirs:
-            raise ValueError(f"Unsupported HEROHE slide id: {slide_id}")
-
-        coord_path = os.path.join(self.coords_dirs[source], f"{source_id}.h5")
-        feature_path = os.path.join(
-            self.feature_dirs[source], f"{source_id}.pt"
-        )
-        with h5py.File(coord_path, "r") as hdf5_file:
-            coords = hdf5_file["coords"][:]
-        features = self._load_pt(feature_path)
-        if features.shape[0] != coords.shape[0]:
-            raise RuntimeError(
-                f"HEROHE patch mismatch for {slide_id}: "
-                f"features={features.shape[0]} coords={coords.shape[0]}"
-            )
-        return features, torch.from_numpy(coords), self.labels[idx]
 
 
 class Generic_Split(Generic_MIL_Dataset):
@@ -676,21 +602,14 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
             self.num_workers = cfg.dataloader.num_workers
 
             order = getattr(cfg.dataset, "order", "forward")
-            if order == 'reverse':
+            if order == "reverse":
                 self.datasets   = list(reversed(self.datasets))
                 self.split_dirs = list(reversed(self.split_dirs))
-            
+
             (task_names, num_classes,
              task_class_ranges, task_to_global_class) = get_order_constants(order)
             self.task_names  = list(task_names)
             self.num_classes = list(num_classes)
-            if len(self.datasets) > len(self.task_names):
-                if order != "forward":
-                    raise ValueError(
-                        "BRACS/HEROHE extension currently supports forward order only"
-                    )
-                self.task_names.extend(["BRACS", "HEROHE"])
-                self.num_classes.extend([3, 2])
         else:
             self._init_hardcoded()
             self.batch_size  = 1
@@ -741,24 +660,6 @@ class Sequential_Generic_MIL_Dataset(ContinualDataset):
             d.tgct.splits,
             d.cesc.splits,
         ]
-
-        if "bracs" in d and "herohe" in d:
-            self.datasets.extend([
-                Generic_MIL_Dataset2(
-                    data_dir=d.bracs.features,
-                    label_dict={0: 0, 1: 1, 2: 2},
-                ),
-                Generic_HEROHE_MIL_Dataset(
-                    train_coords=d.herohe.train_coords,
-                    train_features=d.herohe.train_features,
-                    test_coords=d.herohe.test_coords,
-                    test_features=d.herohe.test_features,
-                ),
-            ])
-            self.split_dirs.extend([
-                d.bracs.splits,
-                d.herohe.splits,
-            ])
 
     # ------------------------------------------------------------------
     # Backward-compat fallback

@@ -24,6 +24,13 @@ SETTING="${SETTING:-ind}"
 ORDER="${ORDER:-forward}"
 MODE="${MODE:-${TTA_MODE:-tcp}}"
 TTA_PARAM_FILE="${TTA_PARAM_FILE:-}"
+if [ -z "$TTA_PARAM_FILE" ]; then
+    if [ "$SETTING" = "ood" ]; then
+        TTA_PARAM_FILE="configs/ood/tta_ood.env"
+    else
+        TTA_PARAM_FILE="configs/ind/tta_ind.env"
+    fi
+fi
 if [ -n "$TTA_PARAM_FILE" ]; then
     if [[ "$TTA_PARAM_FILE" != /* ]]; then
         TTA_PARAM_FILE="$PROJECT_ROOT/$TTA_PARAM_FILE"
@@ -98,6 +105,8 @@ TTA_NO_TASK_AGREEMENT="${TTA_NO_TASK_AGREEMENT:-0}"   # 1 disables JSD agreement
 # Naive inference uses the student by default. DaPC may still
 # instantiate a teacher internally to build detached reliability targets.
 TTA_NO_TEACHER="${TTA_NO_TEACHER:-0}"
+TTA_TCP_INFERENCE_MODEL="${TTA_TCP_INFERENCE_MODEL:-teacher}"
+TTA_NAIVE_INFERENCE_MODEL="${TTA_NAIVE_INFERENCE_MODEL:-student}"
 TTA_EMA_ALPHA="${TTA_EMA_ALPHA:-0.999}"
 TTA_NO_ADAPT_PROMPTS="${TTA_NO_ADAPT_PROMPTS:-0}"
 TTA_EMA_ALPHA_PROMPT="${TTA_EMA_ALPHA_PROMPT:-0.999}"
@@ -192,7 +201,7 @@ echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-<unset>}"
 echo "[INFO] tta_variants=$TTA_VARIANTS"
 echo "[INFO] TTA M=$TTA_M | K_sub=$TTA_K_SUB | top_ratio=$TTA_TOP_RATIO | alpha=$TTA_ALPHA | regularizer=l2_anchor | l2_anchor_beta=$TTA_L2_ANCHOR_BETA | lr=$TTA_LR | n_steps=$TTA_N_STEPS | param_scope=$TTA_PARAM_SCOPE | entropy_threshold=$TTA_ENTROPY_THRESHOLD | tau_task=$TTA_TAU_TASK | naive_use_task_entropy=$TTA_NAIVE_USE_TASK_ENTROPY | reset=$RESET_LABEL | verbose_loss=$TTA_VERBOSE_LOSS"
 echo "[INFO] bugfix_ablation gamma=$TTA_GAMMA | select_mode=$TTA_SELECT_MODE | use_task_diversity=$TTA_USE_TASK_DIVERSITY | no_task_agreement=$TTA_NO_TASK_AGREEMENT"
-echo "[INFO] prompt_adapt no_teacher=$TTA_NO_TEACHER | ema_alpha=$TTA_EMA_ALPHA | no_adapt_prompts=$TTA_NO_ADAPT_PROMPTS | ema_alpha_prompt=$TTA_EMA_ALPHA_PROMPT | delta_margin=$TTA_DELTA_MARGIN | tp_anchor_beta=$TTA_TP_ANCHOR_BETA | gamma_margin=$TTA_GAMMA_MARGIN | no_reset_prompt_per_task=$TTA_NO_RESET_PROMPT_PER_TASK | naive_inference=student"
+echo "[INFO] prompt_adapt no_teacher=$TTA_NO_TEACHER | ema_alpha=$TTA_EMA_ALPHA | no_adapt_prompts=$TTA_NO_ADAPT_PROMPTS | ema_alpha_prompt=$TTA_EMA_ALPHA_PROMPT | delta_margin=$TTA_DELTA_MARGIN | tp_anchor_beta=$TTA_TP_ANCHOR_BETA | gamma_margin=$TTA_GAMMA_MARGIN | no_reset_prompt_per_task=$TTA_NO_RESET_PROMPT_PER_TASK"
 echo "[INFO] dapc enabled=$TTA_USE_DAPC | weight=$TTA_DAPC_LOSS_WEIGHT | entropy_weight=$TTA_ENTROPY_LOSS_WEIGHT | tau_anchor=$TTA_DAPC_TAU_ANCHOR | beta=$TTA_DAPC_BETA"
 
 entrypoint_path="$TTA_ENTRYPOINT"
@@ -243,7 +252,9 @@ run_to_logs() {
     check_log_not_held "$error_log"
     { echo "[INFO] start at $(date)"; echo "[INFO] command=$*"; } > "$result_log"
     { echo "[INFO] start at $(date)"; echo "[INFO] command=$*"; } > "$error_log"
-    "$@" >> "$result_log" 2>> "$error_log"
+    "$@" \
+        > >(tee -a "$result_log") \
+        2> >(tee -a "$error_log" >&2)
 }
 
 variant_enabled() {
@@ -274,6 +285,8 @@ TTA_ARGS=(
     --gamma             "$TTA_GAMMA"
     --select_mode       "$TTA_SELECT_MODE"
     --ema_alpha         "$TTA_EMA_ALPHA"
+    --tcp_inference_model "$TTA_TCP_INFERENCE_MODEL"
+    --naive_inference_model "$TTA_NAIVE_INFERENCE_MODEL"
     --ema_alpha_prompt  "$TTA_EMA_ALPHA_PROMPT"
     --delta_margin      "$TTA_DELTA_MARGIN"
     --tp_anchor_beta    "$TTA_TP_ANCHOR_BETA"
@@ -367,7 +380,7 @@ fi
 
 if variant_enabled naive; then
    NAIVE_EXTRA_ARGS=()
-   if [ "$TTA_USE_DAPC" != "1" ]; then
+   if [ "$TTA_NAIVE_INFERENCE_MODEL" = "student" ] && [ "$TTA_USE_DAPC" != "1" ]; then
        NAIVE_EXTRA_ARGS+=(--no_teacher)
    fi
    run_to_logs \

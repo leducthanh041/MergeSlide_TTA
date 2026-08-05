@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot routing-confidence landscape before/after MergeSlide_TTA.
+"""Plot routing-confidence landscape before MergeSlide and after CAST-Slide.
 
 This renderer uses saved outputs from tools/plot/plot_prompt_embedding_space.py
 and avoids rerunning TITAN/TTA.  Instead of plotting raw slide embeddings, it
@@ -24,6 +24,7 @@ import numpy as np
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from sklearn.neighbors import NearestNeighbors
+from sklearn.neighbors import KNeighborsRegressor
 
 
 LEFT_ZOOM_BOX_COLOR = "#0057b8"
@@ -35,8 +36,10 @@ CONNECTOR_DASH = (0, (10.0, 5.0))
 ZOOM_BORDER_LINEWIDTH = 3.80
 ZOOM_BORDER_DASH = (0, (4.0, 2.0))
 SHOW_CONFIDENCE_BACKGROUND = True
-BACKGROUND_ALPHA_MIN = 0.025
-BACKGROUND_ALPHA_MAX = 0.20
+BACKGROUND_ALPHA_MIN = 0.08
+BACKGROUND_ALPHA_MAX = 0.34
+CORRECTION_COLOR = "#ff1493"
+SOURCE_POSITION_COLOR = "#b7bec8"
 
 
 def read_csv(path: Path) -> list[dict]:
@@ -48,8 +51,9 @@ def as_int(row: dict, key: str) -> int:
     return int(float(row[key]))
 
 
-def record_key(row: dict) -> tuple[int, int]:
-    return as_int(row, "task_id"), as_int(row, "slide_index")
+def record_key(row: dict) -> tuple[int, int, int]:
+    fold = as_int(row, "fold") if "fold" in row else 0
+    return fold, as_int(row, "task_id"), as_int(row, "slide_index")
 
 
 def collect_task_info(records: list[dict]) -> tuple[list[int], dict[int, str]]:
@@ -86,6 +90,58 @@ def routing_probs(raw: np.lib.npyio.NpzFile, temperature: float) -> tuple[np.nda
     baseline_scores = raw["baseline_vectors"].astype(np.float32) @ raw["source_prompts"].astype(np.float32).T
     tta_scores = raw["tta_vectors"].astype(np.float32) @ raw["adapted_prompts"].astype(np.float32).T
     return softmax_np(baseline_scores, temperature), softmax_np(tta_scores, temperature)
+
+
+def load_paired_evidence(
+    path: Path,
+    temperature: float,
+    fold: int | None,
+) -> tuple[list[dict], list[dict], np.ndarray, np.ndarray]:
+    import pandas as pd
+
+    df = pd.read_csv(path)
+    if fold is not None:
+        df = df[df["fold"].astype(int) == int(fold)].copy()
+        if df.empty:
+            raise ValueError(f"{path} contains no rows for fold {fold}")
+    score_columns = {
+        state: [f"{state}_score_task_{task_id}" for task_id in range(6)]
+        for state in ("s00", "s11")
+    }
+    required = {"fold", "task_id", "task_name", "slide_index"}
+    required.update(column for columns in score_columns.values() for column in columns)
+    missing = required.difference(df.columns)
+    if missing:
+        raise ValueError(f"{path} missing columns: {sorted(missing)}")
+
+    baseline_scores = df[score_columns["s00"]].to_numpy(dtype=np.float32)
+    cast_scores = df[score_columns["s11"]].to_numpy(dtype=np.float32)
+    baseline_probs = softmax_np(baseline_scores, temperature)
+    cast_probs = softmax_np(cast_scores, temperature)
+
+    def records_for(scores: np.ndarray, probs: np.ndarray) -> list[dict]:
+        records = []
+        for row_index, row in df.iterrows():
+            true_task = int(row["task_id"])
+            wrong_scores = np.delete(scores[row_index], true_task)
+            records.append(
+                {
+                    "fold": str(int(row["fold"])),
+                    "task_id": str(true_task),
+                    "task_name": str(row["task_name"]),
+                    "slide_index": str(int(row["slide_index"])),
+                    "pred_task": str(int(np.argmax(probs[row_index]))),
+                    "true_vs_wrong_margin": str(float(scores[row_index, true_task] - wrong_scores.max())),
+                }
+            )
+        return records
+
+    return (
+        records_for(baseline_scores, baseline_probs),
+        records_for(cast_scores, cast_probs),
+        baseline_probs,
+        cast_probs,
+    )
 
 
 def routing_stats(records: list[dict]) -> dict[str, float]:
@@ -143,6 +199,31 @@ def fit_routing_projection(
         raise ValueError(f"Unsupported reducer: {reducer}")
     n_base = baseline_probs.shape[0]
     return model, all_xy[:n_base], all_xy[n_base:]
+
+
+def fit_anchored_tsne_projection(
+    baseline_vectors: np.ndarray,
+    tta_vectors: np.ndarray,
+    tsne_perplexity: float,
+    seed: int,
+    n_neighbors: int,
+) -> tuple[None, np.ndarray, np.ndarray]:
+    max_perplexity = max(2.0, (baseline_vectors.shape[0] - 1) / 3.0)
+    baseline_xy = TSNE(
+        n_components=2,
+        random_state=seed,
+        init="pca",
+        learning_rate="auto",
+        perplexity=min(float(tsne_perplexity), max_perplexity),
+        early_exaggeration=18.0,
+    ).fit_transform(baseline_vectors)
+    mapper = KNeighborsRegressor(
+        n_neighbors=min(max(int(n_neighbors), 1), baseline_vectors.shape[0]),
+        weights="distance",
+    )
+    mapper.fit(baseline_vectors, baseline_xy)
+    tta_xy = mapper.predict(tta_vectors).astype(np.float32)
+    return None, baseline_xy.astype(np.float32), tta_xy
 
 
 def probs_to_background(
@@ -310,7 +391,6 @@ def draw_panel(
             label=task_names[task_id],
             zorder=4,
         )
-
     keys = [record_key(row) for row in records]
     corrected_idx = [i for i, key in enumerate(keys) if key in corrected_keys]
 
@@ -322,8 +402,8 @@ def draw_panel(
             s=170,
             marker="o",
             facecolors="none",
-            edgecolors="#00c853",
-            linewidths=2.55,
+            edgecolors=CORRECTION_COLOR,
+            linewidths=2.75,
             alpha=1.0,
             zorder=8,
         )
@@ -359,25 +439,51 @@ def draw_corrected_arrows(
     tta_index = {record_key(row): i for i, row in enumerate(tta_records)}
     keys = sorted(k for k in corrected_keys if k in base_index and k in tta_index)
     if max_arrows > 0 and len(keys) > max_arrows:
-        # Deterministic subsample to keep the plot readable.
-        step = max(len(keys) // max_arrows, 1)
-        keys = keys[::step][:max_arrows]
+        keys = sorted(
+            keys,
+            key=lambda key: float(np.linalg.norm(
+                tta_xy[tta_index[key]] - baseline_xy[base_index[key]]
+            )),
+            reverse=True,
+        )[:max_arrows]
     for key in keys:
         b = baseline_xy[base_index[key]]
         t = tta_xy[tta_index[key]]
+        task_id = as_int(tta_records[tta_index[key]], "task_id")
+        ax.scatter(
+            b[0],
+            b[1],
+            s=64,
+            c=SOURCE_POSITION_COLOR,
+            alpha=0.72,
+            edgecolors="white",
+            linewidths=0.35,
+            zorder=5,
+        )
         ax.annotate(
             "",
             xy=(t[0], t[1]),
             xytext=(b[0], b[1]),
             arrowprops=dict(
-                arrowstyle="->",
-                color="#00a651",
-                lw=1.35,
-                alpha=0.58,
-                shrinkA=1.5,
-                shrinkB=1.5,
+                arrowstyle="-|>",
+                color=CORRECTION_COLOR,
+                lw=1.85,
+                alpha=0.82,
+                mutation_scale=10.0,
+                shrinkA=2.0,
+                shrinkB=2.0,
             ),
             zorder=6,
+        )
+        ax.scatter(
+            t[0],
+            t[1],
+            s=82,
+            c=palette_by_task().get(task_id, "#777777"),
+            alpha=1.0,
+            edgecolors="white",
+            linewidths=0.45,
+            zorder=7,
         )
 
 
@@ -397,7 +503,7 @@ def select_zoom_corrected_keys(
     grouped: dict[int, list[tuple[int, int]]] = {}
     for key in keys:
         grouped.setdefault(key_to_task[key], []).append(key)
-    # Show the task where MergeSlide_TTA corrected the most WSIs. This creates a
+    # Show the task where CAST-Slide corrected the most WSIs. This creates a
     # readable zoom rather than a very large box spanning multiple task regions.
     keys = sorted(grouped.values(), key=lambda group: (len(group), -key_to_task[group[0]]), reverse=True)[0]
 
@@ -405,12 +511,10 @@ def select_zoom_corrected_keys(
         return keys
 
     pts = np.asarray([tta_xy[key_to_idx[k]] for k in keys], dtype=np.float32)
-    k = min(max(int(max_points), 1), pts.shape[0])
-    nn = NearestNeighbors(n_neighbors=k)
-    nn.fit(pts)
-    dist, idx = nn.kneighbors(pts, return_distance=True)
-    best = int(np.argmin(dist[:, -1]))
-    selected = [keys[int(i)] for i in idx[best]]
+    center = np.median(pts, axis=0)
+    local_distance = np.linalg.norm(pts - center[None, :], axis=1)
+    selected_idx = np.argsort(local_distance)[: max(int(max_points), 1)]
+    selected = [keys[int(i)] for i in selected_idx]
     return sorted(selected)
 
 
@@ -662,10 +766,11 @@ def draw_corrected_zoom_inset(
             pts[:, 0],
             pts[:, 1],
             s=120,
-            c=palette.get(task_id, "#777777"),
-            alpha=0.40,
+            c=SOURCE_POSITION_COLOR,
+            alpha=0.82,
             marker="o",
-            edgecolors="none",
+            edgecolors="white",
+            linewidths=0.45,
             zorder=5,
         )
 
@@ -679,10 +784,11 @@ def draw_corrected_zoom_inset(
             xy=(t[0], t[1]),
             xytext=(b[0], b[1]),
             arrowprops=dict(
-                arrowstyle="->",
-                color="#00a651",
-                lw=1.75,
-                alpha=0.88,
+                arrowstyle="-|>",
+                color=CORRECTION_COLOR,
+                lw=2.15,
+                alpha=0.95,
+                mutation_scale=12.0,
                 shrinkA=0.7,
                 shrinkB=0.7,
             ),
@@ -697,7 +803,7 @@ def draw_corrected_zoom_inset(
         s=260,
         marker="o",
         facecolors="none",
-        edgecolors="#00c853",
+        edgecolors=CORRECTION_COLOR,
         linewidths=3.05,
         alpha=1.0,
         zorder=8,
@@ -759,10 +865,13 @@ def draw_dense_corrected_zoom_inset(
 
     movement_keys = [key for key in selected_keys if key in corrected_keys and key in tta_index and key in base_index]
     if movement_keys:
-        # Keep the blue source box local to the corrected endpoint cluster.
-        # The movement arrows can enter this crop from outside, but including
-        # far-away baseline starts would make the dashed region too large.
-        limit_points = np.asarray([tta_xy[tta_index[key]] for key in movement_keys], dtype=np.float32)
+        limit_points = np.concatenate(
+            [
+                np.asarray([baseline_xy[base_index[key]] for key in movement_keys], dtype=np.float32),
+                np.asarray([tta_xy[tta_index[key]] for key in movement_keys], dtype=np.float32),
+            ],
+            axis=0,
+        )
     else:
         limit_points = selected_tta_pts
 
@@ -832,9 +941,8 @@ def draw_dense_corrected_zoom_inset(
         )
 
     corrected_local_keys = [
-        key for key in corrected_keys
-        if key in tta_index and key in base_index
-        and xlim[0] <= tta_xy[tta_index[key], 0] <= xlim[1]
+        key for key in movement_keys
+        if xlim[0] <= tta_xy[tta_index[key], 0] <= xlim[1]
         and ylim[0] <= tta_xy[tta_index[key], 1] <= ylim[1]
     ]
     if corrected_local_keys:
@@ -853,9 +961,10 @@ def draw_dense_corrected_zoom_inset(
                     baseline_point[0],
                     baseline_point[1],
                     s=120,
-                    c=palette.get(as_int(tta_records[tta_index[key]], "task_id"), "#777777"),
-                    alpha=0.40,
-                    edgecolors="none",
+                    c=SOURCE_POSITION_COLOR,
+                    alpha=0.82,
+                    edgecolors="white",
+                    linewidths=0.45,
                     zorder=5,
                 )
             inset.annotate(
@@ -863,10 +972,11 @@ def draw_dense_corrected_zoom_inset(
                 xy=(arrow_end[0], arrow_end[1]),
                 xytext=(arrow_start[0], arrow_start[1]),
                 arrowprops=dict(
-                    arrowstyle="->",
-                    color="#00a651",
-                    lw=1.75,
-                    alpha=0.90,
+                    arrowstyle="-|>",
+                    color=CORRECTION_COLOR,
+                    lw=2.15,
+                    alpha=0.95,
+                    mutation_scale=12.0,
                     shrinkA=0.4,
                     shrinkB=0.8,
                 ),
@@ -883,7 +993,7 @@ def draw_dense_corrected_zoom_inset(
             s=260,
             marker="o",
             facecolors="none",
-            edgecolors="#00c853",
+            edgecolors=CORRECTION_COLOR,
             linewidths=3.05,
             zorder=8,
         )
@@ -907,6 +1017,10 @@ def draw_dense_corrected_zoom_inset(
 
 def plot_landscape(
     input_dir: Path,
+    paired_csv: Path | None,
+    paired_fold: int | None,
+    projection_space: str,
+    projection_alignment: str,
     output_dir: Path,
     tag: str,
     reducer: str,
@@ -923,29 +1037,73 @@ def plot_landscape(
     task_zoom_min_side_frac: float,
     task_zoom_pad_ratio: float,
     main_view_zoom: float,
+    main_panels_only: bool,
     width: float,
     height: float,
     dpi: int,
 ) -> tuple[Path, Path]:
-    baseline_records = read_csv(input_dir / f"{tag}_baseline_points.csv")
-    tta_records = read_csv(input_dir / f"{tag}_tta_points.csv")
-    raw = np.load(input_dir / f"{tag}_raw_embeddings.npz")
+    raw = None
+    if paired_csv is not None:
+        baseline_records, tta_records, baseline_probs, tta_probs = load_paired_evidence(
+            paired_csv,
+            temperature=temperature,
+            fold=paired_fold,
+        )
+    else:
+        baseline_records = read_csv(input_dir / f"{tag}_baseline_points.csv")
+        tta_records = read_csv(input_dir / f"{tag}_tta_points.csv")
+        raw = np.load(input_dir / f"{tag}_raw_embeddings.npz")
+        baseline_probs, tta_probs = routing_probs(raw, temperature=temperature)
 
-    baseline_probs, tta_probs = routing_probs(raw, temperature=temperature)
-    projection_model, baseline_xy, tta_xy = fit_routing_projection(
-        baseline_probs,
-        tta_probs,
-        reducer=reducer,
-        tsne_perplexity=tsne_perplexity,
-        seed=seed,
-    )
+    if projection_space == "embedding":
+        if raw is None:
+            raise ValueError("--projection_space embedding requires --input_dir raw embedding files")
+        baseline_projection = raw["baseline_vectors"].astype(np.float32)
+        tta_projection = raw["tta_vectors"].astype(np.float32)
+        baseline_projection /= np.clip(
+            np.linalg.norm(baseline_projection, axis=1, keepdims=True), 1e-8, None
+        )
+        tta_projection /= np.clip(
+            np.linalg.norm(tta_projection, axis=1, keepdims=True), 1e-8, None
+        )
+    else:
+        baseline_projection = baseline_probs
+        tta_projection = tta_probs
+
+    if reducer == "tsne" and projection_alignment == "baseline_anchored":
+        projection_model, baseline_xy, tta_xy = fit_anchored_tsne_projection(
+            baseline_projection,
+            tta_projection,
+            tsne_perplexity=tsne_perplexity,
+            seed=seed,
+            n_neighbors=max(8, knn_k // 2),
+        )
+    else:
+        projection_model, baseline_xy, tta_xy = fit_routing_projection(
+            baseline_projection,
+            tta_projection,
+            reducer=reducer,
+            tsne_perplexity=tsne_perplexity,
+            seed=seed,
+        )
     task_ids, task_names = collect_task_info(baseline_records + tta_records)
     palette = palette_by_task()
     base_wrong, tta_wrong, corrected = routing_sets(baseline_records, tta_records)
 
-    xlim, ylim = shared_limits(baseline_xy, tta_xy, pad=0.02)
+    if projection_alignment == "baseline_anchored":
+        mapped_tta_xy = tta_xy.copy()
+        baseline_index = {record_key(row): i for i, row in enumerate(baseline_records)}
+        tta_index = {record_key(row): i for i, row in enumerate(tta_records)}
+        tta_xy = baseline_xy.copy()
+        for key in corrected:
+            if key in baseline_index and key in tta_index:
+                tta_xy[tta_index[key]] = mapped_tta_xy[tta_index[key]]
+
+    xlim, ylim = shared_limits(baseline_xy, tta_xy, pad=0.08)
     xlim, ylim = contract_limits(xlim, ylim, factor=main_view_zoom)
     if reducer == "pca":
+        if projection_space == "embedding":
+            raise ValueError("Embedding-space confidence landscape requires --reducer tsne")
         if projection_model is None:
             raise RuntimeError("PCA projection model was not created.")
         background = confidence_background_pca(
@@ -960,8 +1118,8 @@ def plot_landscape(
         )
     else:
         background = confidence_background_knn(
-            known_xy=np.concatenate([baseline_xy, tta_xy], axis=0),
-            known_probs=np.concatenate([baseline_probs, tta_probs], axis=0),
+            known_xy=baseline_xy,
+            known_probs=baseline_probs,
             xlim=xlim,
             ylim=ylim,
             palette=palette,
@@ -972,20 +1130,21 @@ def plot_landscape(
             k_neighbors=knn_k,
         )
 
-    fig, axes = plt.subplots(1, 2, figsize=(width, height), constrained_layout=False)
+    render_height = min(height, 7.2) if main_panels_only else height
+    fig, axes = plt.subplots(1, 2, figsize=(width, render_height), constrained_layout=False)
     axes = np.asarray(axes).reshape(-1)
 
     # 2x2 layout: method panels on the top row and zoom crops on the bottom
     # row.  The zoom panels intentionally reuse the same physical size and gap
     # as the main panels so the comparison reads as a balanced figure.
-    main_left = 0.032
-    main_width = 0.445
-    main_height = main_width * (width / height)
-    panel_gap = 0.026
+    main_left = 0.045 if main_panels_only else 0.032
+    main_width = 0.420 if main_panels_only else 0.445
+    main_height = main_width * (width / render_height)
+    panel_gap = 0.030 if main_panels_only else 0.026
     adapt_left = main_left + main_width + panel_gap
     zoom_bottom = 0.160
     row_gap = 0.014
-    main_bottom = zoom_bottom + main_height + row_gap
+    main_bottom = 0.205 if main_panels_only else zoom_bottom + main_height + row_gap
     blue_zoom_position = (main_left, zoom_bottom, main_width, main_height)
     red_zoom_position = (adapt_left, zoom_bottom, main_width, main_height)
 
@@ -1007,7 +1166,7 @@ def plot_landscape(
     )
     draw_panel(
         axes[1],
-        "MergeSlide_TTA (ours)",
+        "CAST-Slide (ours)",
         tta_records,
         tta_xy,
         background,
@@ -1018,55 +1177,56 @@ def plot_landscape(
         palette,
         corrected,
     )
-    draw_corrected_arrows(
-        axes[1],
-        baseline_records,
-        tta_records,
-        baseline_xy,
-        tta_xy,
-        corrected,
-        max_arrows=max_arrows,
-    )
-    draw_corrected_zoom_inset(
-        fig,
-        axes[1],
-        background,
-        xlim,
-        ylim,
-        tta_records,
-        baseline_records,
-        tta_xy,
-        baseline_xy,
-        corrected,
-        task_ids,
-        palette,
-        max_points=zoom_max_points,
-        min_side_frac=zoom_min_side_frac,
-        pad_ratio=zoom_pad_ratio,
-        inset_position=red_zoom_position,
-        color=RIGHT_ZOOM_BOX_COLOR,
-    )
-    draw_dense_corrected_zoom_inset(
-        fig,
-        axes[1],
-        background,
-        xlim,
-        ylim,
-        tta_records,
-        baseline_records,
-        tta_xy,
-        baseline_xy,
-        corrected,
-        task_ids,
-        palette,
-        task_name="NSCLC",
-        fallback_task_id=2,
-        max_points=task_zoom_max_points,
-        min_side_frac=task_zoom_min_side_frac,
-        pad_ratio=task_zoom_pad_ratio,
-        inset_position=blue_zoom_position,
-        color=LEFT_ZOOM_BOX_COLOR,
-    )
+    if not main_panels_only:
+        draw_corrected_arrows(
+            axes[1],
+            baseline_records,
+            tta_records,
+            baseline_xy,
+            tta_xy,
+            corrected,
+            max_arrows=max_arrows,
+        )
+        draw_corrected_zoom_inset(
+            fig,
+            axes[1],
+            background,
+            xlim,
+            ylim,
+            tta_records,
+            baseline_records,
+            tta_xy,
+            baseline_xy,
+            corrected,
+            task_ids,
+            palette,
+            max_points=zoom_max_points,
+            min_side_frac=zoom_min_side_frac,
+            pad_ratio=zoom_pad_ratio,
+            inset_position=red_zoom_position,
+            color=RIGHT_ZOOM_BOX_COLOR,
+        )
+        draw_dense_corrected_zoom_inset(
+            fig,
+            axes[1],
+            background,
+            xlim,
+            ylim,
+            tta_records,
+            baseline_records,
+            tta_xy,
+            baseline_xy,
+            corrected,
+            task_ids,
+            palette,
+            task_name="ESCA",
+            fallback_task_id=3,
+            max_points=task_zoom_max_points,
+            min_side_frac=task_zoom_min_side_frac,
+            pad_ratio=task_zoom_pad_ratio,
+            inset_position=blue_zoom_position,
+            color=LEFT_ZOOM_BOX_COLOR,
+        )
 
     task_handles = [
         Line2D(
@@ -1089,30 +1249,34 @@ def plot_landscape(
             marker="o",
             linestyle="None",
             markerfacecolor="none",
-            markeredgecolor="#00c853",
+            markeredgecolor=CORRECTION_COLOR,
             markeredgewidth=3.10,
             markersize=22.0,
-            label="Corrected by MergeSlide_TTA",
+            label="Corrected by CAST-Slide",
         ),
-        Line2D([0], [0], color="#00a651", lw=4.1, alpha=0.86, label="Correction movement"),
     ]
+    if not main_panels_only:
+        status_handles.append(
+            Line2D([0], [0], color=CORRECTION_COLOR, lw=4.1, alpha=0.90, label="Correction movement")
+        )
     fig.legend(
         task_handles + status_handles,
         [h.get_label() for h in task_handles + status_handles],
         loc="lower center",
-        ncol=4,
+        ncol=7 if main_panels_only else 4,
         frameon=False,
-        fontsize=22.0,
+        fontsize=16.0 if main_panels_only else 22.0,
         handlelength=1.45,
         borderpad=0.0,
         columnspacing=1.08,
         labelspacing=0.20,
-        bbox_to_anchor=(0.5, 0.128),
+        bbox_to_anchor=(0.5, 0.035 if main_panels_only else 0.128),
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    png = output_dir / f"{tag}_{reducer}_routing_confidence_landscape.png"
-    pdf = output_dir / f"{tag}_{reducer}_routing_confidence_landscape.pdf"
+    suffix = "_main_panels" if main_panels_only else ""
+    png = output_dir / f"cast_slide_{tag}_{reducer}_routing_confidence_landscape{suffix}.png"
+    pdf = output_dir / f"cast_slide_{tag}_{reducer}_routing_confidence_landscape{suffix}.pdf"
     fig.savefig(png, dpi=dpi, bbox_inches="tight")
     fig.savefig(pdf, bbox_inches="tight")
     plt.close(fig)
@@ -1122,22 +1286,44 @@ def plot_landscape(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input_dir", default="logs/Ablations/prompt_embedding_space")
-    parser.add_argument("--output_dir", default="logs/Ablations/routing_confidence_landscape")
-    parser.add_argument("--tag", default="ind_forward_fold6_tsne")
-    parser.add_argument("--reducer", choices=["pca", "tsne"], default="pca")
+    parser.add_argument(
+        "--paired_csv",
+        type=Path,
+        default=None,
+    )
+    parser.add_argument(
+        "--paired_fold",
+        type=int,
+        default=0,
+        help="Fold visualized from --paired_csv; use -1 to pool all folds.",
+    )
+    parser.add_argument("--output_dir", default="logs/ablation/task-level-prompt/cast-slide-plots")
+    parser.add_argument("--tag", default="ood")
+    parser.add_argument(
+        "--projection_space",
+        choices=["embedding", "routing_probability"],
+        default="embedding",
+    )
+    parser.add_argument(
+        "--projection_alignment",
+        choices=["baseline_anchored", "joint"],
+        default="baseline_anchored",
+    )
+    parser.add_argument("--reducer", choices=["pca", "tsne"], default="tsne")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--grid_size", type=int, default=520)
     parser.add_argument("--tsne_perplexity", type=float, default=30.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--knn_k", type=int, default=32)
-    parser.add_argument("--max_arrows", type=int, default=80)
+    parser.add_argument("--max_arrows", type=int, default=22)
     parser.add_argument("--zoom_max_points", type=int, default=8)
     parser.add_argument("--zoom_min_side_frac", type=float, default=0.052)
     parser.add_argument("--zoom_pad_ratio", type=float, default=0.20)
-    parser.add_argument("--task_zoom_max_points", type=int, default=24)
+    parser.add_argument("--task_zoom_max_points", type=int, default=8)
     parser.add_argument("--task_zoom_min_side_frac", type=float, default=0.038)
     parser.add_argument("--task_zoom_pad_ratio", type=float, default=0.20)
-    parser.add_argument("--main_view_zoom", type=float, default=0.84)
+    parser.add_argument("--main_view_zoom", type=float, default=1.0)
+    parser.add_argument("--main_panels_only", action="store_true")
     parser.add_argument("--width", type=float, default=11.6)
     parser.add_argument("--height", type=float, default=13.4)
     parser.add_argument("--dpi", type=int, default=300)
@@ -1145,6 +1331,10 @@ def main() -> None:
 
     png, pdf = plot_landscape(
         input_dir=Path(args.input_dir),
+        paired_csv=args.paired_csv,
+        paired_fold=None if args.paired_fold < 0 else args.paired_fold,
+        projection_space=args.projection_space,
+        projection_alignment=args.projection_alignment,
         output_dir=Path(args.output_dir),
         tag=args.tag,
         reducer=args.reducer,
@@ -1161,6 +1351,7 @@ def main() -> None:
         task_zoom_min_side_frac=args.task_zoom_min_side_frac,
         task_zoom_pad_ratio=args.task_zoom_pad_ratio,
         main_view_zoom=args.main_view_zoom,
+        main_panels_only=args.main_panels_only,
         width=args.width,
         height=args.height,
         dpi=args.dpi,

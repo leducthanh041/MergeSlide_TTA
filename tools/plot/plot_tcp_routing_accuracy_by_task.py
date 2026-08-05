@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Plot TCP routing accuracy by task for MergeSlide vs MergeSlide_TTA.
+"""Plot TCP routing accuracy by task for MergeSlide vs CAST-Slide.
 
 The plot uses per-fold task-level routing accuracies:
 - MergeSlide TCP:
   logs/base_results/{IND,OOD}_results/test_new_run/baseline_tcp_routing_results.csv
-- MergeSlide_TTA TCP:
-  logs/final_best_tta/{ind,ood}/classil_tcp/results.csv
+- CAST-Slide TCP: a collected routing-evidence summary CSV.
 
 Each point/bar is mean ± std over folds.
 """
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,11 +52,11 @@ METHOD_STYLE = {
         "edge": "#0e4f8d",
         "marker": "o",
     },
-    "MergeSlide_TTA": {
-        "color": "#008f4f",
-        "light": "#7bd99f",
-        "edge": "#005f35",
-        "marker": "D",
+    "CAST-Slide": {
+        "color": "#FFD23F",
+        "light": "#FFF0A6",
+        "edge": "#D35400",
+        "marker": "*",
     },
 }
 
@@ -110,25 +110,51 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
     return summary
 
 
-def plot_setting(spec: SettingSpec) -> None:
-    df = pd.concat(
-        [
-            load_method(spec.baseline_csv, "MergeSlide"),
-            load_method(spec.tta_csv, "MergeSlide_TTA"),
-        ],
-        ignore_index=True,
-    )
-    summary = summarize(df)
+def load_evidence_summary(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing CAST-Slide routing summary: {path}")
+    raw = pd.read_csv(path)
+    required = {
+        "task_id", "task_name", "baseline_acc_mean", "baseline_acc_std",
+        "cast_acc_mean", "cast_acc_std", "n_folds",
+    }
+    missing = required.difference(raw.columns)
+    if missing:
+        raise ValueError(f"{path} missing columns: {sorted(missing)}")
+    rows = []
+    for method, prefix in (("MergeSlide", "baseline"), ("CAST-Slide", "cast")):
+        part = raw[["task_id", "task_name", f"{prefix}_acc_mean", f"{prefix}_acc_std", "n_folds"]].copy()
+        part.columns = ["task_id", "task_name", "mean", "std", "n"]
+        part["method"] = method
+        part["mean"] = part["mean"].astype(float) / 100.0
+        part["std"] = part["std"].astype(float) / 100.0
+        rows.append(part)
+    return pd.concat(rows, ignore_index=True)
 
-    summary_csv = OUT_DIR / f"{spec.setting}_tcp_routing_accuracy_by_task_summary.csv"
+
+def plot_setting(spec: SettingSpec, evidence_csv: Path | None = None, out_dir: Path = OUT_DIR) -> None:
+    if evidence_csv is None:
+        df = pd.concat(
+            [
+                load_method(spec.baseline_csv, "MergeSlide"),
+                load_method(spec.tta_csv, "CAST-Slide"),
+            ],
+            ignore_index=True,
+        )
+        summary = summarize(df)
+    else:
+        summary = load_evidence_summary(evidence_csv)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary_csv = out_dir / f"{spec.setting}_tcp_routing_accuracy_by_task_summary.csv"
     summary.to_csv(summary_csv, index=False)
 
     fig, ax = plt.subplots(figsize=(7.3, 3.6))
     x = list(range(len(TASK_ORDER)))
-    offsets = {"MergeSlide": -0.18, "MergeSlide_TTA": 0.18}
+    offsets = {"MergeSlide": -0.18, "CAST-Slide": 0.18}
     width = 0.32
 
-    for method in ["MergeSlide", "MergeSlide_TTA"]:
+    for method in ["MergeSlide", "CAST-Slide"]:
         part = summary[summary["method"] == method].copy()
         means = []
         stds = []
@@ -149,9 +175,9 @@ def plot_setting(spec: SettingSpec) -> None:
             label=method,
             color=style["color"],
             edgecolor=style["edge"],
-            linewidth=1.3 if method == "MergeSlide_TTA" else 0.9,
+            linewidth=1.3 if method == "CAST-Slide" else 0.9,
             alpha=0.92,
-            zorder=3 if method == "MergeSlide_TTA" else 2,
+            zorder=3 if method == "CAST-Slide" else 2,
         )
         apply_vertical_gradient(ax, bars, style["light"], style["color"])
         ax.errorbar(
@@ -170,7 +196,7 @@ def plot_setting(spec: SettingSpec) -> None:
             means,
             color=style["edge"],
             marker=style["marker"],
-            markersize=5.5 if method == "MergeSlide_TTA" else 4.8,
+            markersize=8.5 if method == "CAST-Slide" else 4.8,
             markerfacecolor=style["edge"],
             markeredgecolor=style["edge"],
             markeredgewidth=1.0,
@@ -194,10 +220,10 @@ def plot_setting(spec: SettingSpec) -> None:
             label="MergeSlide",
         ),
         Patch(
-            facecolor=METHOD_STYLE["MergeSlide_TTA"]["color"],
-            edgecolor=METHOD_STYLE["MergeSlide_TTA"]["edge"],
+            facecolor=METHOD_STYLE["CAST-Slide"]["color"],
+            edgecolor=METHOD_STYLE["CAST-Slide"]["edge"],
             linewidth=1.3,
-            label="MergeSlide_TTA",
+            label="CAST-Slide",
         ),
     ]
     legend = ax.legend(
@@ -212,14 +238,14 @@ def plot_setting(spec: SettingSpec) -> None:
         handletextpad=0.55,
     )
     for text in legend.get_texts():
-        if text.get_text() == "MergeSlide_TTA":
+        if text.get_text() == "CAST-Slide":
             text.set_fontweight("bold")
     for spine in ax.spines.values():
         spine.set_linewidth(1.0)
 
     fig.tight_layout()
     for suffix in ("png", "pdf"):
-        out = OUT_DIR / f"{spec.setting}_tcp_routing_accuracy_by_task.{suffix}"
+        out = out_dir / f"{spec.setting}_tcp_routing_accuracy_by_task.{suffix}"
         fig.savefig(out, dpi=300 if suffix == "png" else None, bbox_inches="tight")
         print(f"Saved: {out}")
     print(f"Saved: {summary_csv}")
@@ -227,9 +253,40 @@ def plot_setting(spec: SettingSpec) -> None:
 
 
 def main() -> None:
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    for spec in SETTINGS:
-        plot_setting(spec)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--evidence_csv",
+        type=Path,
+        default=None,
+        help="Optional precomputed routing_by_task.csv; overrides the two result CSVs.",
+    )
+    parser.add_argument(
+        "--baseline_csv",
+        type=Path,
+        default=REPO_ROOT / "logs/base_results/OOD_results/test_new_run/baseline_tcp_routing_results.csv",
+    )
+    parser.add_argument(
+        "--cast_csv",
+        type=Path,
+        default=REPO_ROOT / "logs/tta/ood/class_il/tta_tcp_routing_results.csv",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=Path,
+        default=REPO_ROOT / "logs/ablation/task-level-prompt/cast-slide-plots",
+    )
+    parser.add_argument("--setting", default="ood")
+    args = parser.parse_args()
+
+    if args.setting != "ood":
+        raise ValueError(f"Unsupported setting: {args.setting}")
+    spec = SettingSpec(
+        setting=args.setting,
+        title="Out-of-domain",
+        baseline_csv=args.baseline_csv,
+        tta_csv=args.cast_csv,
+    )
+    plot_setting(spec, evidence_csv=args.evidence_csv, out_dir=args.output_dir)
 
 
 if __name__ == "__main__":

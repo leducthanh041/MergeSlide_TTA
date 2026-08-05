@@ -6,6 +6,7 @@ PROJECT_ROOT="${PROJECT_ROOT:-/mmlab_students/storageStudents/nguyenvd/Thanhld/W
 PYTHON_BIN="${PYTHON_BIN:-/mmlab_students/storageStudents/nguyenvd/anaconda3/envs/mergePre/bin/python3.10}"
 SETTING="${SETTING:-ind}"
 N_TRIALS="${N_TRIALS:-60}"
+N_STEPS="${N_STEPS:-3}"
 SEED="${SEED:-42}"
 TOP_K="${TOP_K:-10}"
 GPU_A="${GPU_A:-0}"
@@ -24,14 +25,14 @@ case "$SETTING" in
         BASE_CONFIG="${BASE_CONFIG:-configs/default_eval_num_workers0.yaml}"
         MERGE_DIR="${MERGE_DIR:-./checkpoints/merged}"
         FINETUNED_DIR="${FINETUNED_DIR:-./checkpoints/finetuned}"
-        DEFAULT_NAIVE_PARAMS="logs/tune_naive/gpu4_w0/ind/naive/trial_0003/params.json"
+        DEFAULT_NAIVE_PARAMS="configs/ind/tta_ind.env"
         DEFAULT_BASELINE_RESULT_CSV="/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA_v1/logs/base_results/IND_results/test_new_run/baseline_tcp_routing_results.csv"
         ;;
     ood)
         BASE_CONFIG="${BASE_CONFIG:-configs/default_ood_eval_num_workers0.yaml}"
         MERGE_DIR="${MERGE_DIR:-./checkpoints_ood/merged}"
         FINETUNED_DIR="${FINETUNED_DIR:-./checkpoints_ood/finetuned}"
-        DEFAULT_NAIVE_PARAMS="logs/tune_naive/ood/naive/best_trial.json"
+        DEFAULT_NAIVE_PARAMS="configs/ood/tta_ood.env"
         DEFAULT_BASELINE_RESULT_CSV="/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MergeSlide_TTA_v1/logs/base_results/OOD_results/test_new_run/baseline_tcp_routing_results.csv"
         ;;
     *)
@@ -56,7 +57,7 @@ fi
 OUTPUT_ROOT="${OUTPUT_ROOT:-/docker/data/thanhld/MergeSlide_TTA/logs/tune_tcp_routing_constrained}"
 LOG_DIR="${LOG_DIR:-$OUTPUT_ROOT/launcher_logs/$SETTING}"
 MANIFEST_DIR="$OUTPUT_ROOT/manifests/$SETTING"
-MANIFEST_PATH="$MANIFEST_DIR/manifest_${SETTING}_tcp_routing_allfolds_${N_TRIALS}_${SEED}.json"
+MANIFEST_PATH="$MANIFEST_DIR/manifest_${SETTING}_tcp_routing_allfolds_nsteps${N_STEPS}_${N_TRIALS}_${SEED}.json"
 
 mkdir -p "$OUTPUT_ROOT" "$LOG_DIR" "$MANIFEST_DIR"
 
@@ -68,6 +69,7 @@ if [ ! -f "$MANIFEST_PATH" ]; then
     "$PYTHON_BIN" -u "$TUNER" \
         --setting "$SETTING" \
         --n_trials "$N_TRIALS" \
+        --n_steps "$N_STEPS" \
         --seed "$SEED" \
         --base_config "$BASE_CONFIG" \
         --merge_dir "$MERGE_DIR" \
@@ -92,8 +94,10 @@ PIDS=()
 
 echo "[INFO] mode=tcp setting=$SETTING trials=$N_TRIALS"
 echo "[INFO] fixed_naive_params=$NAIVE_PARAMS_FILE"
+echo "[INFO] fixed_n_steps=$N_STEPS"
 echo "[INFO] baseline_result_csv=$BASELINE_RESULT_CSV"
 echo "[INFO] baseline_tolerance=$BASELINE_TOLERANCE"
+echo "[INFO] selection=ESCA/TGCT/CESC/overall > baseline-tolerance; maximize mean bACC only"
 echo "[INFO] output_root=$OUTPUT_ROOT"
 echo "[INFO] manifest=$MANIFEST_PATH"
 
@@ -124,6 +128,7 @@ for ((worker=0; worker<TOTAL_WORKERS; worker++)); do
         "$PYTHON_BIN" -u "$TUNER" \
             --setting "$SETTING" \
             --n_trials "$N_TRIALS" \
+            --n_steps "$N_STEPS" \
             --seed "$SEED" \
             --base_config "$BASE_CONFIG" \
             --merge_dir "$MERGE_DIR" \
@@ -151,6 +156,7 @@ done
 "$PYTHON_BIN" -u "$TUNER" \
     --setting "$SETTING" \
     --n_trials "$N_TRIALS" \
+    --n_steps "$N_STEPS" \
     --seed "$SEED" \
     --base_config "$BASE_CONFIG" \
     --merge_dir "$MERGE_DIR" \

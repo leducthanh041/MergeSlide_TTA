@@ -6,6 +6,7 @@ PROJECT_ROOT="${PROJECT_ROOT:-/mmlab_students/storageStudents/nguyenvd/Thanhld/W
 PYTHON_BIN="${PYTHON_BIN:-/mmlab_students/storageStudents/nguyenvd/anaconda3/envs/mergePre/bin/python3.10}"
 SETTING="${SETTING:-ind}"
 N_TRIALS="${N_TRIALS:-60}"
+N_STEPS="${N_STEPS:-3}"
 SEED="${SEED:-42}"
 TOP_K="${TOP_K:-10}"
 GPU_A="${GPU_A:-0}"
@@ -14,6 +15,8 @@ WORKERS_PER_GPU="${WORKERS_PER_GPU:-1}"
 SINGLE_GPU="${SINGLE_GPU:-1}"
 TIMEOUT_SEC="${TIMEOUT_SEC:-0}"
 RESET_MANIFEST="${RESET_MANIFEST:-0}"
+RESET_EARLY_STOP="${RESET_EARLY_STOP:-$RESET_MANIFEST}"
+OOD_EARLY_STOP_BACC="${OOD_EARLY_STOP_BACC:-81.5}"
 TUNER="${TUNER:-tools/random_search_classil_tta.py}"
 WRAPPER="${WRAPPER:-tools/run_classil_with_pt_features.py}"
 
@@ -39,18 +42,31 @@ esac
 OUTPUT_ROOT="${OUTPUT_ROOT:-/docker/data/thanhld/MergeSlide_TTA/logs/tune_naive}"
 LOG_DIR="${LOG_DIR:-$OUTPUT_ROOT/launcher_logs/$SETTING}"
 MANIFEST_DIR="$OUTPUT_ROOT/manifests/$SETTING"
-MANIFEST_PATH="$MANIFEST_DIR/manifest_${SETTING}_naive_${N_TRIALS}_${SEED}.json"
+MANIFEST_PATH="$MANIFEST_DIR/manifest_${SETTING}_naive_nsteps${N_STEPS}_${N_TRIALS}_${SEED}.json"
+EARLY_STOP_SIGNAL="$MANIFEST_DIR/manifest_${SETTING}_naive_nsteps${N_STEPS}_${N_TRIALS}_${SEED}.early_stop.json"
 
 mkdir -p "$OUTPUT_ROOT" "$LOG_DIR" "$MANIFEST_DIR"
 
 if [ "$RESET_MANIFEST" = "1" ] && [ -f "$MANIFEST_PATH" ]; then
     mv "$MANIFEST_PATH" "$MANIFEST_PATH.bak.$(date +%Y%m%d_%H%M%S)"
 fi
+if [ "$RESET_EARLY_STOP" = "1" ] && [ -f "$EARLY_STOP_SIGNAL" ]; then
+    mv "$EARLY_STOP_SIGNAL" "$EARLY_STOP_SIGNAL.bak.$(date +%Y%m%d_%H%M%S)"
+fi
+
+EARLY_STOP_ARGS=()
+if [ "$SETTING" = "ood" ]; then
+    EARLY_STOP_ARGS=(
+        --early_stop_bacc "$OOD_EARLY_STOP_BACC"
+        --early_stop_signal "$EARLY_STOP_SIGNAL"
+    )
+fi
 
 if [ ! -f "$MANIFEST_PATH" ]; then
     "$PYTHON_BIN" -u "$TUNER" \
         --setting "$SETTING" \
         --n_trials "$N_TRIALS" \
+        --n_steps "$N_STEPS" \
         --seed "$SEED" \
         --base_config "$BASE_CONFIG" \
         --merge_dir "$MERGE_DIR" \
@@ -73,9 +89,15 @@ REMAINDER=$((N_TRIALS % TOTAL_WORKERS))
 PIDS=()
 
 echo "[INFO] mode=naive setting=$SETTING trials=$N_TRIALS"
-echo "[INFO] fixed: n_steps=5 M=8 K_sub=300"
+echo "[INFO] fixed: n_steps=$N_STEPS M=8 K_sub=300"
 echo "[INFO] output_root=$OUTPUT_ROOT"
 echo "[INFO] manifest=$MANIFEST_PATH"
+if [ "$SETTING" = "ood" ]; then
+    echo "[INFO] ood_early_stop_bacc=${OOD_EARLY_STOP_BACC}%"
+    echo "[INFO] early_stop_signal=$EARLY_STOP_SIGNAL"
+else
+    echo "[INFO] OOD early stop disabled for IND"
+fi
 
 for ((worker=0; worker<TOTAL_WORKERS; worker++)); do
     extra=0
@@ -104,6 +126,7 @@ for ((worker=0; worker<TOTAL_WORKERS; worker++)); do
         "$PYTHON_BIN" -u "$TUNER" \
             --setting "$SETTING" \
             --n_trials "$N_TRIALS" \
+            --n_steps "$N_STEPS" \
             --seed "$SEED" \
             --base_config "$BASE_CONFIG" \
             --merge_dir "$MERGE_DIR" \
@@ -116,7 +139,8 @@ for ((worker=0; worker<TOTAL_WORKERS; worker++)); do
             --trial_start "$start" \
             --trial_end "$end" \
             --timeout_sec "$TIMEOUT_SEC" \
-            --top_k "$TOP_K"
+            --top_k "$TOP_K" \
+            "${EARLY_STOP_ARGS[@]}"
     ) >"$stdout_log" 2>"$stderr_log" &
     PIDS+=("$!")
 done
@@ -128,6 +152,7 @@ done
 "$PYTHON_BIN" -u "$TUNER" \
     --setting "$SETTING" \
     --n_trials "$N_TRIALS" \
+    --n_steps "$N_STEPS" \
     --seed "$SEED" \
     --base_config "$BASE_CONFIG" \
     --merge_dir "$MERGE_DIR" \

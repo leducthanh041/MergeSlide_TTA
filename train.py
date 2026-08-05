@@ -189,10 +189,7 @@ if __name__ == "__main__":
 
     # Build prompt classifier ONCE (expensive — loads TITAN text encoder)
     print("Building prompt classifier ...")
-    classifier, _ = build_prompt_classifier(
-        str(device),
-        include_external_tasks=num_tasks > NUM_TASKS,
-    )
+    classifier, _ = build_prompt_classifier(str(device))
     print_gpu_vram("after_prompt_classifier", device)
     print(
         f"[INFO] configured_tasks={num_tasks} "

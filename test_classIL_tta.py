@@ -46,6 +46,7 @@ from transformers import AutoModel
 from mergeslide_tta.constants import K_PATCHES, NUM_TASKS
 from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
 from mergeslide_tta.metrics import pad_numpy_arrays
+from mergeslide_tta.task_prompt_io import load_task_prompts_for_tasks
 from mergeslide_tta.prompts_zeroshot import (
     brca_prompts, rcc_prompts, nsclc_prompts,
     esca_prompts, tgct_prompts, cesc_prompts,
@@ -64,7 +65,6 @@ _PROMPT_FN_MAP = {
     "TGCT":  tgct_prompts,
     "CESC":  cesc_prompts,
 }
-
 
 # ---------------------------------------------------------------------------
 # Path helpers -- identical to test_classIL_task_prompt.py
@@ -94,11 +94,17 @@ def ensure_local_hot_storage() -> Path:
 
 
 def resolve_hot_path(path: str, local_root: Path) -> Path:
+    def resolve_hot_parts(parts: tuple[str, ...]) -> Path:
+        repo_hot_root = PROJECT_ROOT / parts[0]
+        if repo_hot_root.is_symlink():
+            return repo_hot_root.resolve().joinpath(*parts[1:])
+        return local_root.joinpath(*parts)
+
     raw = Path(path).expanduser()
     if not raw.is_absolute():
         parts = raw.parts
         if parts and parts[0] in HOT_DIR_NAMES:
-            return local_root.joinpath(*parts)
+            return resolve_hot_parts(parts)
         return raw
     try:
         relative = raw.relative_to(PROJECT_ROOT)
@@ -106,7 +112,7 @@ def resolve_hot_path(path: str, local_root: Path) -> Path:
         return raw
     parts = relative.parts
     if parts and parts[0] in HOT_DIR_NAMES:
-        return local_root.joinpath(*parts)
+        return resolve_hot_parts(parts)
     return raw
 
 
@@ -116,7 +122,13 @@ def resolve_hot_path(path: str, local_root: Path) -> Path:
 
 def build_class_embeddings(device, task_names: list) -> torch.Tensor:
     """[768, C_total] -- identical logic to test_classIL_task_prompt.py."""
-    print("Building all_class_embeddings for naive mode ...")
+    unknown_tasks = [name for name in task_names if name not in _PROMPT_FN_MAP]
+    if unknown_tasks:
+        raise ValueError(
+            f"Missing zero-shot prompt functions for tasks: {unknown_tasks}"
+        )
+
+    print("Building global class embeddings for naive/TCP fallback ...")
     titan = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
     titan = titan.to(device)
     _, templates = brca_prompts()
@@ -391,6 +403,18 @@ if __name__ == "__main__":
     parser.add_argument("--no_teacher",        action="store_true",
                         help="Disable mean-teacher; route/infer with the "
                              "backbone being adapted directly.")
+    parser.add_argument(
+        "--tcp_inference_model",
+        choices=["teacher", "student"],
+        default="teacher",
+        help="Backbone used by final TCP routing and class inference.",
+    )
+    parser.add_argument(
+        "--naive_inference_model",
+        choices=["student", "teacher"],
+        default="student",
+        help="Backbone used by final naive class inference.",
+    )
     parser.add_argument("--ema_alpha",         type=float, default=0.999,
                         help="Teacher EMA momentum.")
     parser.add_argument("--no_adapt_prompts",  action="store_true",
@@ -463,7 +487,11 @@ if __name__ == "__main__":
     )
     if routing_tune_only and args.mode != "tcp":
         parser.error("TCP routing-only tuning requires --mode tcp")
-    if args.mode == "naive" and not args.use_dapc:
+    if (
+        args.mode == "naive"
+        and args.naive_inference_model == "student"
+        and not args.use_dapc
+    ):
         # Naive Class-IL does not use TCP/task prompt routing. Keep the
         # teacher branch disabled by default even when users call this
         # entrypoint directly without the bash runner.
@@ -487,15 +515,30 @@ if __name__ == "__main__":
 
     num_tasks   = cfg.training.num_tasks
     seq_dataset = Sequential_Generic_MIL_Dataset(cfg)
+    if num_tasks != NUM_TASKS or len(seq_dataset.task_names) != NUM_TASKS:
+        raise ValueError(
+            "This TTA entrypoint requires the active six-task sequence: "
+            f"config={num_tasks}, dataset={len(seq_dataset.task_names)}, "
+            f"expected={NUM_TASKS}."
+        )
 
     # Load embeddings by mode (same logic as original)
-    task_prompts = torch.load(PROJECT_ROOT / "task_prompts.pt").to(device)
-    if getattr(cfg.dataset, "order", "forward") == "reverse":
-        task_prompts = task_prompts.flip(0)
+    task_prompts = load_task_prompts_for_tasks(
+        PROJECT_ROOT / "task_prompts.pt",
+        seq_dataset.task_names,
+        device,
+    )
 
     # Naive predicts globally; TCP also needs this classifier for its
     # low-confidence fallback.
     all_class_embeddings = build_class_embeddings(device, seq_dataset.task_names)
+    expected_classes = sum(seq_dataset.num_classes)
+    if all_class_embeddings.ndim != 2 or all_class_embeddings.shape[1] != expected_classes:
+        raise ValueError(
+            "Global class embedding shape does not match the configured task "
+            f"sequence: expected [D, {expected_classes}], got "
+            f"{tuple(all_class_embeddings.shape)}"
+        )
 
     print("Loading TITAN base model ...")
     base_model = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
@@ -564,6 +607,8 @@ if __name__ == "__main__":
             gamma                = args.gamma,
             select_mode          = args.select_mode,
             use_teacher          = (not args.no_teacher),
+            tcp_inference_model  = args.tcp_inference_model,
+            naive_inference_model=args.naive_inference_model,
             ema_alpha            = args.ema_alpha,
             adapt_task_prompts   = (not args.no_adapt_prompts),
             ema_alpha_prompt     = args.ema_alpha_prompt,
@@ -588,18 +633,19 @@ if __name__ == "__main__":
             }
 
         if routing_tune_only:
-            cesc_task_id = 5
-            if num_tasks <= cesc_task_id:
+            if "CESC" not in seq_dataset.task_names:
                 raise ValueError(
-                    f"CESC tuning requires task 5, but num_tasks={num_tasks}"
+                    "CESC tuning requires a task named 'CESC', but configured "
+                    f"tasks are {seq_dataset.task_names}"
                 )
-            if seq_dataset.task_names[cesc_task_id] != "CESC":
-                raise ValueError(
-                    "TCP fold-0 tuner expects task_id=5 to be CESC, got "
-                    f"{seq_dataset.task_names[cesc_task_id]!r}"
-                )
+            cesc_task_id = seq_dataset.task_names.index("CESC")
+            routing_task_ids = (
+                range(num_tasks)
+                if args.tcp_tune_routing_all_folds
+                else range(cesc_task_id + 1)
+            )
 
-            for task_id in range(cesc_task_id + 1):
+            for task_id in routing_task_ids:
                 _, _, test_loader = seq_dataset.get_data_loaders(fold_id, task_id)
                 if (
                     not args.no_reset_prompt_per_task
@@ -715,7 +761,12 @@ if __name__ == "__main__":
                     )
                 loss_line += (
                     f" | l2_anchor={loss_summary.get('loss/l2_anchor', float('nan')):.6f}"
-                    f" | dapc={loss_summary.get('loss/dapc', 0.0):.6f}"
+                )
+                if args.mode == "tcp":
+                    loss_line += (
+                        f" | dapc={loss_summary.get('loss/dapc', 0.0):.6f}"
+                    )
+                loss_line += (
                     f" | adapted={loss_summary.get('adapted_count', 0):.0f}/"
                     f"{loss_summary.get('total_count', 0):.0f}"
                 )

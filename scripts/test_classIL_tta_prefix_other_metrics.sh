@@ -17,6 +17,13 @@ SETTING="${SETTING:-ind}"
 ORDER="${ORDER:-forward}"
 MODE="${MODE:-tcp}"
 TTA_PARAM_FILE="${TTA_PARAM_FILE:-}"
+if [ -z "$TTA_PARAM_FILE" ]; then
+    if [ "$SETTING" = "ood" ]; then
+        TTA_PARAM_FILE="configs/ood/tta_ood.env"
+    else
+        TTA_PARAM_FILE="configs/ind/tta_ind.env"
+    fi
+fi
 FOLD_START="${FOLD_START:-0}"
 FOLD_END="${FOLD_END:-}"
 
@@ -91,6 +98,8 @@ TTA_SELECT_MODE="${TTA_SELECT_MODE:-intersection}"
 TTA_USE_TASK_DIVERSITY="${TTA_USE_TASK_DIVERSITY:-0}"
 TTA_NO_TASK_AGREEMENT="${TTA_NO_TASK_AGREEMENT:-0}"
 TTA_NO_TEACHER="${TTA_NO_TEACHER:-0}"
+TTA_TCP_INFERENCE_MODEL="${TTA_TCP_INFERENCE_MODEL:-teacher}"
+TTA_NAIVE_INFERENCE_MODEL="${TTA_NAIVE_INFERENCE_MODEL:-student}"
 TTA_EMA_ALPHA="${TTA_EMA_ALPHA:-0.999}"
 TTA_NO_ADAPT_PROMPTS="${TTA_NO_ADAPT_PROMPTS:-0}"
 TTA_EMA_ALPHA_PROMPT="${TTA_EMA_ALPHA_PROMPT:-0.999}"
@@ -211,6 +220,11 @@ run_one_mode() {
     if [ -n "$FOLD_END" ]; then
         args+=(--fold_end "$FOLD_END")
     fi
+    if [ "$run_mode" = "tcp" ]; then
+        args+=(--tcp_inference_model "$TTA_TCP_INFERENCE_MODEL")
+    elif [ "$TTA_NAIVE_INFERENCE_MODEL" != "student" ]; then
+        args+=(--naive_inference_model "$TTA_NAIVE_INFERENCE_MODEL")
+    fi
     if [ "$TTA_USE_TASK_DIVERSITY" = "1" ]; then
         args+=(--use_task_diversity)
     fi
@@ -225,7 +239,7 @@ run_one_mode() {
     else
         args+=(--no_naive_task_entropy)
     fi
-    if [ "$TTA_NO_TEACHER" = "1" ] || { [ "$run_mode" = "naive" ] && [ "$TTA_USE_DAPC" != "1" ]; }; then
+    if [ "$TTA_NO_TEACHER" = "1" ] || { [ "$run_mode" = "naive" ] && [ "$TTA_NAIVE_INFERENCE_MODEL" = "student" ] && [ "$TTA_USE_DAPC" != "1" ]; }; then
         args+=(--no_teacher)
     fi
     if [ "$TTA_NO_ADAPT_PROMPTS" = "1" ]; then
@@ -249,7 +263,9 @@ run_one_mode() {
         echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-<unset>}"
         echo "[INFO] tta_param_file=${TTA_PARAM_FILE:-<defaults>}"
         echo "[INFO] TTA M=$TTA_M K_sub=$TTA_K_SUB top_ratio=$TTA_TOP_RATIO alpha=$TTA_ALPHA l2_anchor_beta=$TTA_L2_ANCHOR_BETA lr=$TTA_LR n_steps=$TTA_N_STEPS param_scope=$TTA_PARAM_SCOPE entropy_threshold=$TTA_ENTROPY_THRESHOLD"
-        echo "[INFO] DaPC enabled=$TTA_USE_DAPC weight=$TTA_DAPC_LOSS_WEIGHT entropy_weight=$TTA_ENTROPY_LOSS_WEIGHT tau_anchor=$TTA_DAPC_TAU_ANCHOR beta=$TTA_DAPC_BETA"
+        if [ "$run_mode" = "tcp" ]; then
+            echo "[INFO] DaPC enabled=$TTA_USE_DAPC weight=$TTA_DAPC_LOSS_WEIGHT entropy_weight=$TTA_ENTROPY_LOSS_WEIGHT tau_anchor=$TTA_DAPC_TAU_ANCHOR beta=$TTA_DAPC_BETA"
+        fi
         echo "[INFO] command=${args[*]}"
         "${args[@]}"
         echo "[INFO] finished at $(date)"

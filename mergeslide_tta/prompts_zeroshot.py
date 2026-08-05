@@ -127,7 +127,7 @@ def rcc_prompts():
             'renal cell carcinoma, chromophobe type',
             'renal cell carcinoma of the chromophobe type',
             'chromophobe rcc',
-            'chromophobe renal cell carcinoma, which is a rare type of kidney cancer that forms in the cells lining the small tubules in the kidney. These small tubules help filter waste from the blood, making urine.'
+            #'chromophobe renal cell carcinoma, which is a rare type of kidney cancer that forms in the cells lining the small tubules in the kidney. These small tubules help filter waste from the blood, making urine.'
         ]
             ]
 
@@ -320,43 +320,4 @@ def cesc_prompts():
         for j in range(len(prompts[i])):
             cls_template.extend([template.replace('CLASSNAME', prompts[i][j]) for template in templates])
         cls_templates.append(cls_template)
-    return prompts, templates
-
-
-def bracs_prompts():
-    prompts = [
-        [
-            "benign breast tissue",
-            "benign breast lesion",
-            "benign breast tumor",
-        ],
-        [
-            "atypical breast lesion",
-            "atypical breast tissue",
-            "atypical breast tumor",
-        ],
-        [
-            "breast carcinoma",
-            "malignant breast tumor",
-            "malignant breast tissue",
-        ],
-    ]
-    _, templates = brca_prompts()
-    return prompts, templates
-
-
-def herohe_prompts():
-    prompts = [
-        [
-            "HER2-negative breast cancer",
-            "HER2-negative breast carcinoma",
-            "breast carcinoma without HER2 overexpression",
-        ],
-        [
-            "HER2-positive breast cancer",
-            "HER2-positive breast carcinoma",
-            "breast carcinoma with HER2 overexpression",
-        ],
-    ]
-    _, templates = brca_prompts()
     return prompts, templates

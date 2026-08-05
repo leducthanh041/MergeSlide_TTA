@@ -174,7 +174,9 @@ run_to_logs() {
         echo "[INFO] command=$*"
     } > "$error_log"
 
-    "$@" >> "$result_log" 2>> "$error_log"
+    "$@" \
+        > >(tee -a "$result_log") \
+        2> >(tee -a "$error_log" >&2)
 }
 
 mode_enabled() {

@@ -44,12 +44,29 @@ from mergeslide_tta.constants import (
 from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
 from mergeslide_tta.metrics import pad_numpy_arrays
 from mergeslide_tta.model import CustomSequential
+from mergeslide_tta.task_prompt_io import load_task_prompts_for_tasks
+from mergeslide_tta.prompts_zeroshot import (
+    brca_prompts,
+    cesc_prompts,
+    esca_prompts,
+    nsclc_prompts,
+    rcc_prompts,
+    tgct_prompts,
+)
 
 from mergeslide_tta.utils import get_eval_metrics, seed_torch
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 HOT_DIR_NAMES = {"checkpoints", "logs", "sqlite"}
 
+_PROMPT_FN_MAP = {
+    "BRCA": brca_prompts,
+    "RCC": rcc_prompts,
+    "NSCLC": nsclc_prompts,
+    "ESCA": esca_prompts,
+    "TGCT": tgct_prompts,
+    "CESC": cesc_prompts,
+}
 
 def get_local_hot_root() -> Path:
     user = os.environ.get("USER") or "thanhld"
@@ -69,7 +86,7 @@ def ensure_local_hot_storage() -> Path:
         local_path = local_root / name
         if repo_path.is_symlink():
             if repo_path.resolve() != local_path.resolve():
-                print(f"[WARN] {repo_path} points to {repo_path.resolve()}, expected {local_path}")
+                print(f"[INFO] Using configured symlink: {repo_path} -> {repo_path.resolve()}")
         elif repo_path.exists():
             print(f"[WARN] {repo_path} is not a symlink; use {local_path} for hot-write data.")
         else:
@@ -82,11 +99,17 @@ def ensure_local_hot_storage() -> Path:
 
 
 def resolve_hot_path(path: str, local_root: Path) -> Path:
+    def resolve_hot_parts(parts: tuple[str, ...]) -> Path:
+        repo_hot_root = PROJECT_ROOT / parts[0]
+        if repo_hot_root.is_symlink():
+            return repo_hot_root.resolve().joinpath(*parts[1:])
+        return local_root.joinpath(*parts)
+
     raw_path = Path(path).expanduser()
     if not raw_path.is_absolute():
         parts = raw_path.parts
         if parts and parts[0] in HOT_DIR_NAMES:
-            return local_root.joinpath(*parts)
+            return resolve_hot_parts(parts)
         return raw_path
 
     try:
@@ -96,7 +119,7 @@ def resolve_hot_path(path: str, local_root: Path) -> Path:
 
     parts = relative.parts
     if parts and parts[0] in HOT_DIR_NAMES:
-        return local_root.joinpath(*parts)
+        return resolve_hot_parts(parts)
     return raw_path
 
 
@@ -329,6 +352,7 @@ def eval_task_naive(
  
             convert_preds_all.append(np.array([pred_global]))
             convert_targets_all.append(np.array([true_global]))
+
  
     return _pack_results(
         preds_all, targets_all, probs_all,
@@ -366,9 +390,8 @@ def build_class_embeddings(device, task_names: list) -> torch.Tensor:
     Build all_class_embeddings [EMBED_DIM, total_classes] từ TITAN text encoder.
     Dùng cho Naive mode.
 
-    Columns được sắp xếp theo đúng thứ tự task_names:
-        Forward:  col 0,1=BRCA | 2,3,4=RCC | 5,6=NSCLC | 7,8=ESCA | 9,10=TGCT | 11,12=CESC
-        Reversed: col 0,1=CESC | 2,3=TGCT  | 4,5=ESCA  | 6,7=NSCLC | 8,9,10=RCC | 11,12=BRCA
+    Columns follow task_names. The active forward sequence is:
+        BRCA | RCC | NSCLC | ESCA | TGCT | CESC.
     """
     print("Building all_class_embeddings for Naive mode ...")
     titan = AutoModel.from_pretrained("MahmoodLab/TITAN", trust_remote_code=True)
@@ -450,12 +473,18 @@ if __name__ == "__main__":
     num_tasks    = cfg.training.num_tasks
     seq_dataset  = Sequential_Generic_MIL_Dataset(cfg)
     num_classes  = seq_dataset.num_classes
+    if num_tasks != NUM_TASKS or len(seq_dataset.task_names) != NUM_TASKS:
+        raise ValueError(
+            "This baseline entrypoint requires the active six-task sequence: "
+            f"config={num_tasks}, dataset={len(seq_dataset.task_names)}, "
+            f"expected={NUM_TASKS}."
+        )
 
     # Load embeddings tuỳ theo mode
     if args.mode == "tcp":
-        task_prompts = torch.load(PROJECT_ROOT / "task_prompts.pt").to(device)
-        if getattr(cfg.dataset, 'order', 'forward') == 'reverse':
-            task_prompts = task_prompts.flip(0)
+        task_prompts = load_task_prompts_for_tasks(
+            PROJECT_ROOT / "task_prompts.pt", seq_dataset.task_names, device
+        )
         all_class_embeddings = None
     else:
         task_prompts        = None

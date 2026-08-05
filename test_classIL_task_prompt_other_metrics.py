@@ -40,6 +40,7 @@ from mergeslide_tta.prompts_zeroshot import (
     esca_prompts, tgct_prompts, cesc_prompts,
 )
 from mergeslide_tta.utils import get_eval_metrics, seed_torch
+from mergeslide_tta.task_prompt_io import load_task_prompts_for_tasks
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 HOT_DIR_NAMES = {"checkpoints", "logs", "sqlite"}
@@ -63,7 +64,7 @@ def ensure_local_hot_storage() -> Path:
         local_path = local_root / name
         if repo_path.is_symlink():
             if repo_path.resolve() != local_path.resolve():
-                print(f"[WARN] {repo_path} points to {repo_path.resolve()}, expected {local_path}")
+                print(f"[INFO] Using configured symlink: {repo_path} -> {repo_path.resolve()}")
         elif repo_path.exists():
             print(f"[WARN] {repo_path} is not a symlink; use {local_path} for hot-write data.")
         else:
@@ -76,11 +77,17 @@ def ensure_local_hot_storage() -> Path:
 
 
 def resolve_hot_path(path: str, local_root: Path) -> Path:
+    def resolve_hot_parts(parts: tuple[str, ...]) -> Path:
+        repo_hot_root = PROJECT_ROOT / parts[0]
+        if repo_hot_root.is_symlink():
+            return repo_hot_root.resolve().joinpath(*parts[1:])
+        return local_root.joinpath(*parts)
+
     raw_path = Path(path).expanduser()
     if not raw_path.is_absolute():
         parts = raw_path.parts
         if parts and parts[0] in HOT_DIR_NAMES:
-            return local_root.joinpath(*parts)
+            return resolve_hot_parts(parts)
         return raw_path
 
     try:
@@ -90,7 +97,7 @@ def resolve_hot_path(path: str, local_root: Path) -> Path:
 
     parts = relative.parts
     if parts and parts[0] in HOT_DIR_NAMES:
-        return local_root.joinpath(*parts)
+        return resolve_hot_parts(parts)
     return raw_path
 
 _PROMPT_FN_MAP = {
@@ -307,9 +314,9 @@ if __name__ == "__main__":
 
     # Load embeddings tuỳ theo mode
     if args.mode == "tcp":
-        task_prompts = torch.load(PROJECT_ROOT / "task_prompts.pt").to(device)
-        if getattr(cfg.dataset, 'order', 'forward') == 'reverse':
-            task_prompts = task_prompts.flip(0)
+        task_prompts = load_task_prompts_for_tasks(
+            PROJECT_ROOT / "task_prompts.pt", seq_dataset.task_names, device
+        )
         all_class_embeddings = None
     else:
         task_prompts         = None
