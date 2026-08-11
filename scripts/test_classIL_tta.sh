@@ -268,71 +268,95 @@ variant_enabled() {
     esac
 }
 
-# ---------------------------------------------------------------------------
-# TTA base args  ti s dng cho tt c 4 variants
-# ---------------------------------------------------------------------------
-TTA_ARGS=(
+build_variant_args() {
+    local variant="$1"
+    local alpha="$TTA_ALPHA"
+    local gamma="$TTA_GAMMA"
+    local ema_alpha="$TTA_EMA_ALPHA"
+    local ema_alpha_prompt="$TTA_EMA_ALPHA_PROMPT"
+    local delta_margin="$TTA_DELTA_MARGIN"
+    local tp_anchor_beta="$TTA_TP_ANCHOR_BETA"
+    local gamma_margin="$TTA_GAMMA_MARGIN"
+    local tau_task="$TTA_TAU_TASK"
+    local use_dapc="$TTA_USE_DAPC"
+    local no_teacher="$TTA_NO_TEACHER"
+
+    if [ "$variant" = "naive" ]; then
+        alpha="${TTA_NAIVE_ALPHA:-$alpha}"
+        gamma="${TTA_NAIVE_GAMMA:-$gamma}"
+        ema_alpha="${TTA_NAIVE_EMA_ALPHA:-$ema_alpha}"
+        ema_alpha_prompt="${TTA_NAIVE_EMA_ALPHA_PROMPT:-$ema_alpha_prompt}"
+        delta_margin="${TTA_NAIVE_DELTA_MARGIN:-$delta_margin}"
+        tp_anchor_beta="${TTA_NAIVE_TP_ANCHOR_BETA:-$tp_anchor_beta}"
+        gamma_margin="${TTA_NAIVE_GAMMA_MARGIN:-$gamma_margin}"
+        tau_task="${TTA_NAIVE_TAU_TASK:-$tau_task}"
+        use_dapc="${TTA_NAIVE_USE_DAPC:-$use_dapc}"
+        no_teacher="${TTA_NAIVE_NO_TEACHER:-$no_teacher}"
+    fi
+
+    VARIANT_ARGS=(
     --entrypoint        "$TTA_ENTRYPOINT"
     --M                 "$TTA_M"
     --K_sub             "$TTA_K_SUB"
     --top_ratio         "$TTA_TOP_RATIO"
-    --alpha             "$TTA_ALPHA"
+    --alpha             "$alpha"
     --l2_anchor_beta    "$TTA_L2_ANCHOR_BETA"
     --lr                "$TTA_LR"
     --n_steps           "$TTA_N_STEPS"
     --tta_param_scope   "$TTA_PARAM_SCOPE"
     --entropy_threshold "$TTA_ENTROPY_THRESHOLD"
-    --gamma             "$TTA_GAMMA"
+    --gamma             "$gamma"
     --select_mode       "$TTA_SELECT_MODE"
-    --ema_alpha         "$TTA_EMA_ALPHA"
+    --ema_alpha         "$ema_alpha"
     --tcp_inference_model "$TTA_TCP_INFERENCE_MODEL"
     --naive_inference_model "$TTA_NAIVE_INFERENCE_MODEL"
-    --ema_alpha_prompt  "$TTA_EMA_ALPHA_PROMPT"
-    --delta_margin      "$TTA_DELTA_MARGIN"
-    --tp_anchor_beta    "$TTA_TP_ANCHOR_BETA"
-    --gamma_margin      "$TTA_GAMMA_MARGIN"
-    --tau_task          "$TTA_TAU_TASK"
+    --ema_alpha_prompt  "$ema_alpha_prompt"
+    --delta_margin      "$delta_margin"
+    --tp_anchor_beta    "$tp_anchor_beta"
+    --gamma_margin      "$gamma_margin"
+    --tau_task          "$tau_task"
     --dapc_loss_weight  "$TTA_DAPC_LOSS_WEIGHT"
     --entropy_loss_weight "$TTA_ENTROPY_LOSS_WEIGHT"
     --dapc_tau_anchor   "$TTA_DAPC_TAU_ANCHOR"
     --dapc_beta         "$TTA_DAPC_BETA"
-)
-if [ "$TTA_USE_DAPC" = "1" ]; then
-    TTA_ARGS+=(--use_dapc)
-fi
-if [ "$TTA_VERBOSE_LOSS" = "1" ]; then
-    TTA_ARGS+=(--verbose_loss)
-fi
-if [ "$TTA_EPISODIC" = "1" ]; then
-    TTA_ARGS+=(--episodic)
-fi
-if [ "$TTA_NAIVE_USE_TASK_ENTROPY" = "1" ]; then
-    TTA_ARGS+=(--naive_use_task_entropy)
-else
-    TTA_ARGS+=(--no_naive_task_entropy)
-fi
-if [ "$TTA_USE_TASK_DIVERSITY" = "1" ]; then
-    TTA_ARGS+=(--use_task_diversity)
-fi
-if [ "$TTA_NO_TASK_AGREEMENT" = "1" ]; then
-    TTA_ARGS+=(--no_task_agreement)
-fi
-if [ "$TTA_NO_TEACHER" = "1" ]; then
-    TTA_ARGS+=(--no_teacher)
-fi
-if [ "$TTA_NO_ADAPT_PROMPTS" = "1" ]; then
-    TTA_ARGS+=(--no_adapt_prompts)
-fi
-if [ "$TTA_NO_RESET_PROMPT_PER_TASK" = "1" ]; then
-    TTA_ARGS+=(--no_reset_prompt_per_task)
-fi
-if [ -n "$TTA_DIAG_DIR" ]; then
-    if supports_arg "--diag_dir"; then
-        TTA_ARGS+=(--diag_dir "$TTA_DIAG_DIR")
-    else
-        echo "[WARN] $TTA_ENTRYPOINT does not support --diag_dir; skipping TTA_DIAG_DIR=$TTA_DIAG_DIR" >&2
+    )
+    if [ "$use_dapc" = "1" ]; then
+        VARIANT_ARGS+=(--use_dapc)
     fi
-fi
+    if [ "$TTA_VERBOSE_LOSS" = "1" ]; then
+        VARIANT_ARGS+=(--verbose_loss)
+    fi
+    if [ "$TTA_EPISODIC" = "1" ]; then
+        VARIANT_ARGS+=(--episodic)
+    fi
+    if [ "$TTA_NAIVE_USE_TASK_ENTROPY" = "1" ]; then
+        VARIANT_ARGS+=(--naive_use_task_entropy)
+    else
+        VARIANT_ARGS+=(--no_naive_task_entropy)
+    fi
+    if [ "$TTA_USE_TASK_DIVERSITY" = "1" ]; then
+        VARIANT_ARGS+=(--use_task_diversity)
+    fi
+    if [ "$TTA_NO_TASK_AGREEMENT" = "1" ]; then
+        VARIANT_ARGS+=(--no_task_agreement)
+    fi
+    if [ "$no_teacher" = "1" ]; then
+        VARIANT_ARGS+=(--no_teacher)
+    fi
+    if [ "$TTA_NO_ADAPT_PROMPTS" = "1" ]; then
+        VARIANT_ARGS+=(--no_adapt_prompts)
+    fi
+    if [ "$TTA_NO_RESET_PROMPT_PER_TASK" = "1" ]; then
+        VARIANT_ARGS+=(--no_reset_prompt_per_task)
+    fi
+    if [ -n "$TTA_DIAG_DIR" ]; then
+        if supports_arg "--diag_dir"; then
+            VARIANT_ARGS+=(--diag_dir "$TTA_DIAG_DIR")
+        else
+            echo "[WARN] $TTA_ENTRYPOINT does not support --diag_dir; skipping TTA_DIAG_DIR=$TTA_DIAG_DIR" >&2
+        fi
+    fi
+}
 result_csv_for() {
     local variant="$1"
     if [ -n "$TTA_RESULT_CSV" ]; then
@@ -366,6 +390,7 @@ append_result_csv_arg() {
 # ---------------------------------------------------------------------------
 
 if variant_enabled tcp; then
+    build_variant_args tcp
     run_to_logs \
         "$LOG_DIR/result_tta_tcp.log" \
         "$LOG_DIR/error_tta_tcp.log" \
@@ -374,15 +399,12 @@ if variant_enabled tcp; then
             --save_dir         "$SAVE_DIR_FORWARD" \
             --merge_model_path "$MERGE_MODEL_PATH_FORWARD" \
             --mode tcp \
-            "${TTA_ARGS[@]}" \
+            "${VARIANT_ARGS[@]}" \
             $(append_result_csv_arg tcp)
 fi
 
 if variant_enabled naive; then
-   NAIVE_EXTRA_ARGS=()
-   if [ "$TTA_NAIVE_INFERENCE_MODEL" = "student" ] && [ "$TTA_USE_DAPC" != "1" ]; then
-       NAIVE_EXTRA_ARGS+=(--no_teacher)
-   fi
+   build_variant_args naive
    run_to_logs \
        "$LOG_DIR/result_tta_naive.log" \
        "$LOG_DIR/error_tta_naive.log" \
@@ -391,8 +413,7 @@ if variant_enabled naive; then
            --save_dir         "$SAVE_DIR_FORWARD" \
            --merge_model_path "$MERGE_MODEL_PATH_FORWARD" \
            --mode naive \
-           "${TTA_ARGS[@]}" \
-           "${NAIVE_EXTRA_ARGS[@]}" \
+           "${VARIANT_ARGS[@]}" \
            $(append_result_csv_arg naive)
 fi
 

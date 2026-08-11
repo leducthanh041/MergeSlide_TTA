@@ -846,6 +846,10 @@ def draw_dense_corrected_zoom_inset(
     pad_ratio: float,
     inset_position: tuple[float, float, float, float],
     color: str,
+    x_shift_frac: float = 0.0,
+    y_shift_frac: float = 0.0,
+    width_scale: float = 1.0,
+    height_scale: float = 1.0,
 ) -> None:
     task_id, selected_keys = select_dense_corrected_task_region(
         tta_records=tta_records,
@@ -882,12 +886,15 @@ def draw_dense_corrected_zoom_inset(
         pad_ratio=pad_ratio,
     )
     box_scale = 1.00 if movement_keys else 0.92
-    x_shift = 0.004 * (global_xlim[1] - global_xlim[0])
-    y_shift = 0.002 * (global_ylim[1] - global_ylim[0])
+    x_shift = x_shift_frac * (global_xlim[1] - global_xlim[0])
+    y_shift = y_shift_frac * (global_ylim[1] - global_ylim[0])
+
     center_x = (xlim[0] + xlim[1]) / 2.0 + x_shift
     center_y = (ylim[0] + ylim[1]) / 2.0 + y_shift
-    half_width = (xlim[1] - xlim[0]) * box_scale / 2.0
-    half_height = (ylim[1] - ylim[0]) * box_scale / 2.0
+
+    half_width = (xlim[1] - xlim[0]) * width_scale / 2.0
+    half_height = (ylim[1] - ylim[0]) * height_scale / 2.0
+
     xlim = (center_x - half_width, center_x + half_width)
     ylim = (center_y - half_height, center_y + half_height)
 
@@ -941,8 +948,10 @@ def draw_dense_corrected_zoom_inset(
         )
 
     corrected_local_keys = [
-        key for key in movement_keys
-        if xlim[0] <= tta_xy[tta_index[key], 0] <= xlim[1]
+        key for key in corrected_keys
+        if key in tta_index
+        and key in base_index
+        and xlim[0] <= tta_xy[tta_index[key], 0] <= xlim[1]
         and ylim[0] <= tta_xy[tta_index[key], 1] <= ylim[1]
     ]
     if corrected_local_keys:
@@ -1000,7 +1009,7 @@ def draw_dense_corrected_zoom_inset(
 
     inset.set_xlim(*xlim)
     inset.set_ylim(*ylim)
-    inset.set_box_aspect(source_box_visual_aspect(global_xlim, global_ylim, xlim, ylim))
+    inset.set_aspect("auto")
     inset.set_anchor("N")
     inset.set_xticks([])
     inset.set_yticks([])
@@ -1134,19 +1143,19 @@ def plot_landscape(
     fig, axes = plt.subplots(1, 2, figsize=(width, render_height), constrained_layout=False)
     axes = np.asarray(axes).reshape(-1)
 
-    # 2x2 layout: method panels on the top row and zoom crops on the bottom
-    # row.  The zoom panels intentionally reuse the same physical size and gap
-    # as the main panels so the comparison reads as a balanced figure.
+    # 2x2 layout: method panels on the top row and zoom crops on the bottom.
     main_left = 0.045 if main_panels_only else 0.032
     main_width = 0.420 if main_panels_only else 0.445
     main_height = main_width * (width / render_height)
     panel_gap = 0.030 if main_panels_only else 0.026
     adapt_left = main_left + main_width + panel_gap
-    zoom_bottom = 0.160
     row_gap = 0.014
-    main_bottom = 0.205 if main_panels_only else zoom_bottom + main_height + row_gap
-    blue_zoom_position = (main_left, zoom_bottom, main_width, main_height)
-    red_zoom_position = (adapt_left, zoom_bottom, main_width, main_height)
+    zoom_top = 0.160 + main_height
+    zoom_height = main_height * 0.60
+    zoom_bottom = zoom_top - zoom_height
+    main_bottom = 0.205 if main_panels_only else zoom_top + row_gap
+    blue_zoom_position = (main_left, zoom_bottom, main_width, zoom_height)
+    red_zoom_position = (adapt_left, zoom_bottom, main_width, zoom_height)
 
     axes[0].set_position([main_left, main_bottom, main_width, main_height])
     axes[1].set_position([adapt_left, main_bottom, main_width, main_height])
@@ -1177,6 +1186,26 @@ def plot_landscape(
         palette,
         corrected,
     )
+    for ax in axes:
+        ax.text(
+            0.025,
+            0.975,
+            "DBI = 2.216",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=18.0,
+            fontweight="bold",
+            color="black",
+            bbox={
+                "boxstyle": "square,pad=0.25",
+                "facecolor": "white",
+                "edgecolor": "black",
+                "linewidth": 1.4,
+                "alpha": 0.95,
+            },
+            zorder=30,
+        )
     if not main_panels_only:
         draw_corrected_arrows(
             axes[1],
@@ -1187,7 +1216,7 @@ def plot_landscape(
             corrected,
             max_arrows=max_arrows,
         )
-        draw_corrected_zoom_inset(
+        draw_dense_corrected_zoom_inset(
             fig,
             axes[1],
             background,
@@ -1200,9 +1229,17 @@ def plot_landscape(
             corrected,
             task_ids,
             palette,
-            max_points=zoom_max_points,
-            min_side_frac=zoom_min_side_frac,
-            pad_ratio=zoom_pad_ratio,
+            task_name="NSCLC",
+            #######
+            x_shift_frac=0.035,
+            y_shift_frac=0.12,
+            width_scale=0.16,
+            height_scale=0.55,
+            #######
+            fallback_task_id=2,
+            max_points=8,
+            min_side_frac=0.030,
+            pad_ratio=0.12,
             inset_position=red_zoom_position,
             color=RIGHT_ZOOM_BOX_COLOR,
         )
@@ -1219,11 +1256,17 @@ def plot_landscape(
             corrected,
             task_ids,
             palette,
-            task_name="ESCA",
-            fallback_task_id=3,
-            max_points=task_zoom_max_points,
-            min_side_frac=task_zoom_min_side_frac,
-            pad_ratio=task_zoom_pad_ratio,
+            task_name="CESC",
+            fallback_task_id=5,
+            #######
+            x_shift_frac=-0.13,
+            y_shift_frac=0.03,
+            width_scale=0.30,
+            height_scale=0.10,
+            #######
+            max_points=8,
+            min_side_frac=0.030,
+            pad_ratio=0.12,
             inset_position=blue_zoom_position,
             color=LEFT_ZOOM_BOX_COLOR,
         )
@@ -1270,7 +1313,7 @@ def plot_landscape(
         borderpad=0.0,
         columnspacing=1.08,
         labelspacing=0.20,
-        bbox_to_anchor=(0.5, 0.035 if main_panels_only else 0.128),
+        bbox_to_anchor=(0.5, 0.035 if main_panels_only else 0.205),
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)

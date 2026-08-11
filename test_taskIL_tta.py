@@ -22,7 +22,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
-from sklearn.metrics import balanced_accuracy_score
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 from tqdm import tqdm
 from transformers import AutoModel
 
@@ -34,6 +39,23 @@ from mergeslide_tta.tta_adapter import MergeSlide_TTA, load_task_weights
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 HOT_DIR_NAMES = {"checkpoints", "logs", "sqlite"}
+
+
+def class_metric_labels(task_names, num_classes):
+    return [
+        f"{task_name}/class_{class_id}"
+        for task_name, count in zip(task_names, num_classes)
+        for class_id in range(count)
+    ]
+
+
+def safe_ovr_auc(targets, probabilities, class_id):
+    binary_targets = (targets == class_id).astype(int)
+    if np.unique(binary_targets).size < 2:
+        return float("nan")
+    return roc_auc_score(binary_targets, probabilities[:, class_id])
+
+
 def get_local_hot_root() -> Path:
     user = os.environ.get("USER") or "thanhld"
     default_root = Path("/docker/data") / user / PROJECT_ROOT.name
@@ -145,7 +167,7 @@ def eval_task_taskil_tta(
                   f"mean_loss={mean_loss:.4f} "
                   f"source_anchor={mean_source_anchor:.4f}")
 
-    return metrics, preds_arr, targets_arr, elapsed_s
+    return metrics, preds_arr, targets_arr, probs_arr, elapsed_s
 
 
 if __name__ == "__main__":
@@ -210,6 +232,9 @@ if __name__ == "__main__":
 
     overall_baccs    = []
     overall_accs     = []
+    overall_recalls  = []
+    overall_precisions = []
+    overall_aucs     = []
     all_acc_per_task = []
     efficiency_params = None
     total_timed_s = 0.0
@@ -236,6 +261,9 @@ if __name__ == "__main__":
 
         all_baccs    = []
         all_accs     = []
+        fold_recalls = []
+        fold_precisions = []
+        fold_aucs    = []
         acc_per_task = {}
 
         for task_id in range(num_tasks):
@@ -270,7 +298,7 @@ if __name__ == "__main__":
 
             _, _, test_loader = seq_dataset.get_data_loaders(fold_id, task_id)
 
-            results, preds_all, targets_all, task_elapsed = eval_task_taskil_tta(
+            results, preds_all, targets_all, probs_all, task_elapsed = eval_task_taskil_tta(
                 test_loader  = test_loader,
                 task_id      = task_id,
                 tta_model    = tta_model,
@@ -286,6 +314,26 @@ if __name__ == "__main__":
             all_baccs.append(bacc)
             all_accs.append(acc)
 
+            local_labels = np.arange(seq_dataset.num_classes[task_id])
+            fold_recalls.extend(recall_score(
+                targets_all,
+                preds_all,
+                labels=local_labels,
+                average=None,
+                zero_division=0,
+            ).tolist())
+            fold_precisions.extend(precision_score(
+                targets_all,
+                preds_all,
+                labels=local_labels,
+                average=None,
+                zero_division=0,
+            ).tolist())
+            fold_aucs.extend(
+                safe_ovr_auc(targets_all, probs_all, class_id)
+                for class_id in local_labels
+            )
+
             n_adapted = tta_model.n_adapted
             n_total   = n_adapted + tta_model.n_skipped
             print(f"  Fold {fold_id} | {seq_dataset.task_names[task_id]}: "
@@ -296,6 +344,9 @@ if __name__ == "__main__":
 
         overall_baccs.append(np.mean(all_baccs))
         overall_accs.append(np.mean(all_accs))
+        overall_recalls.append(np.asarray(fold_recalls, dtype=float))
+        overall_precisions.append(np.asarray(fold_precisions, dtype=float))
+        overall_aucs.append(np.asarray(fold_aucs, dtype=float))
         all_acc_per_task.append(acc_per_task)
 
         print(f"[Fold {fold_id}] BAcc={np.mean(all_baccs)*100:.4f}% "
@@ -306,6 +357,37 @@ if __name__ == "__main__":
           f" ({np.std(overall_baccs)*100:.4f}%)")
     print(f"Accuracy:     {np.mean(overall_accs)*100:.4f}%"
           f" ({np.std(overall_accs)*100:.4f}%)")
+
+    metric_labels = class_metric_labels(
+        seq_dataset.task_names, seq_dataset.num_classes
+    )
+    recall_values = np.stack(overall_recalls)
+    precision_values = np.stack(overall_precisions)
+    auc_values = np.stack(overall_aucs)
+
+    print("\nRecall per class:")
+    for label, value, std in zip(
+        metric_labels,
+        np.nanmean(recall_values, axis=0),
+        np.nanstd(recall_values, axis=0),
+    ):
+        print(f"  {label}: {value*100:.4f}% ({std*100:.4f}%)")
+
+    print("\nPrecision per class:")
+    for label, value, std in zip(
+        metric_labels,
+        np.nanmean(precision_values, axis=0),
+        np.nanstd(precision_values, axis=0),
+    ):
+        print(f"  {label}: {value*100:.4f}% ({std*100:.4f}%)")
+
+    print("\nAUC per class:")
+    for label, value, std in zip(
+        metric_labels,
+        np.nanmean(auc_values, axis=0),
+        np.nanstd(auc_values, axis=0),
+    ):
+        print(f"  {label}: {value*100:.4f}% ({std*100:.4f}%)")
 
     print("\nAcc per task:")
     accs = {t: [] for t in range(num_tasks)}

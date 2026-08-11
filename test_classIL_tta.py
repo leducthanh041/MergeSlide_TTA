@@ -66,6 +66,21 @@ _PROMPT_FN_MAP = {
     "CESC":  cesc_prompts,
 }
 
+
+def class_metric_labels(task_names, num_classes):
+    return [
+        f"{task_name}/class_{class_id}"
+        for task_name, count in zip(task_names, num_classes)
+        for class_id in range(count)
+    ]
+
+
+def safe_ovr_auc(targets, probabilities, class_id):
+    binary_targets = (targets == class_id).astype(int)
+    if np.unique(binary_targets).size < 2:
+        return float("nan")
+    return roc_auc_score(binary_targets, probabilities[:, class_id])
+
 # ---------------------------------------------------------------------------
 # Path helpers -- identical to test_classIL_task_prompt.py
 # ---------------------------------------------------------------------------
@@ -846,19 +861,12 @@ if __name__ == "__main__":
             if args.mode == "tcp":
                 # Local class indices
                 for i in range(seq_dataset.num_classes[task_id]):
-                    all_aucs.append(
-                        roc_auc_score((targets_all == i).astype(int), probs_all[:, i])
-                    )
+                    all_aucs.append(safe_ovr_auc(targets_all, probs_all, i))
             else:
                 # Global class indices (targets_all already in global space)
                 global_idxs = sorted(seq_dataset.task_to_global_class[task_id].values())
                 for g_idx in global_idxs:
-                    all_aucs.append(
-                        roc_auc_score(
-                            (targets_all == g_idx).astype(int),
-                            probs_all[:, g_idx]
-                        )
-                    )
+                    all_aucs.append(safe_ovr_auc(targets_all, probs_all, g_idx))
 
         n_adapted = tta_model.n_adapted
         n_skipped = tta_model.n_skipped
@@ -871,16 +879,36 @@ if __name__ == "__main__":
         all_preds_g   = np.concatenate(all_preds_g)
         all_targets_g = np.concatenate(all_targets_g)
 
-        overall_accs.append(np.mean(all_accs))
-        overall_baccs.append(np.mean(all_baccs))
-        overall_macro_f1s.append(
-            f1_score(all_targets_g, all_preds_g, average="macro"))
-        overall_weighted_f1s.append(
-            f1_score(all_targets_g, all_preds_g, average="weighted"))
-        overall_recalls.append(
-            recall_score(all_targets_g, all_preds_g, average=None))
-        overall_precisions.append(
-            precision_score(all_targets_g, all_preds_g, average=None))
+        fold_acc = np.mean(all_accs)
+        fold_bacc = np.mean(all_baccs)
+        fold_macro_f1 = f1_score(all_targets_g, all_preds_g, average="macro")
+        fold_weighted_f1 = f1_score(
+            all_targets_g, all_preds_g, average="weighted"
+        )
+        overall_accs.append(fold_acc)
+        overall_baccs.append(fold_bacc)
+        overall_macro_f1s.append(fold_macro_f1)
+        overall_weighted_f1s.append(fold_weighted_f1)
+        for result_row in all_results[-num_tasks:]:
+            result_row["fold_acc"] = fold_acc
+            result_row["fold_bacc"] = fold_bacc
+            result_row["fold_macro_f1"] = fold_macro_f1
+            result_row["fold_weighted_f1"] = fold_weighted_f1
+        global_labels = np.arange(sum(seq_dataset.num_classes))
+        overall_recalls.append(recall_score(
+            all_targets_g,
+            all_preds_g,
+            labels=global_labels,
+            average=None,
+            zero_division=0,
+        ))
+        overall_precisions.append(precision_score(
+            all_targets_g,
+            all_preds_g,
+            labels=global_labels,
+            average=None,
+            zero_division=0,
+        ))
         overall_aucs.append(np.array(all_aucs))
         overall_times.append(fold_time / num_tasks)
         all_acc_per_task.append(acc_per_task)
@@ -984,6 +1012,37 @@ if __name__ == "__main__":
           f" ({np.std(overall_weighted_f1s)*100:.4f}%)")
     print(f"Inference time: {np.mean(overall_times):.3f}s"
           f" ({np.std(overall_times):.3f}s)")
+
+    metric_labels = class_metric_labels(
+        seq_dataset.task_names, seq_dataset.num_classes
+    )
+    recall_values = np.stack(overall_recalls)
+    precision_values = np.stack(overall_precisions)
+    auc_values = np.stack(overall_aucs)
+
+    print("\nRecall per class:")
+    for label, value, std in zip(
+        metric_labels,
+        np.nanmean(recall_values, axis=0),
+        np.nanstd(recall_values, axis=0),
+    ):
+        print(f"  {label}: {value*100:.4f}% ({std*100:.4f}%)")
+
+    print("\nPrecision per class:")
+    for label, value, std in zip(
+        metric_labels,
+        np.nanmean(precision_values, axis=0),
+        np.nanstd(precision_values, axis=0),
+    ):
+        print(f"  {label}: {value*100:.4f}% ({std*100:.4f}%)")
+
+    print("\nAUC per class:")
+    for label, value, std in zip(
+        metric_labels,
+        np.nanmean(auc_values, axis=0),
+        np.nanstd(auc_values, axis=0),
+    ):
+        print(f"  {label}: {value*100:.4f}% ({std*100:.4f}%)")
 
     print("\nAcc per task:")
     accs = {t: [] for t in range(num_tasks)}

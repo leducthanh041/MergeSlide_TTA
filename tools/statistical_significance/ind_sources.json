@@ -1,0 +1,252 @@
+{
+  "reference_method": "CAST-Slide TCP",
+  "expected_folds": 10,
+  "methods": [
+    {
+      "name": "CAST-Slide TCP",
+      "family": "ours",
+      "sources": [
+        {
+          "type": "task_csv_mean",
+          "path": "logs/tta/ind/classil/tta_tcp_routing_results.csv",
+          "fold_column": "fold",
+          "metric_columns": {"bacc": "bacc"}
+        },
+        {
+          "type": "task_csv_mean",
+          "path": "logs/tta/ind/classil_per_class_metrics/tta_tcp_routing_results.csv",
+          "fold_column": "fold",
+          "metric_columns": {"macro_f1": "fold_macro_f1"}
+        },
+        {
+          "type": "csv",
+          "path": "logs/tta/ind/classil_other_metrics/tcp/outputs/fold_summary.csv",
+          "fold_column": "fold",
+          "metric_columns": {"mean_acc": "macc_acc"}
+        }
+      ]
+    },
+    {
+      "name": "MergeSlide",
+      "family": "model_merging_baseline",
+      "sources": [
+        {
+          "type": "fold_line_log",
+          "path": "logs/base_results/IND_results/test_new_run/result_test_class_tcp.log"
+        },
+        {
+          "type": "macc_log",
+          "path": "logs/base_results/IND_results/test_om_pt_run/result_om_naive.log"
+        }
+      ]
+    },
+    {
+      "name": "AdaMerging",
+      "family": "tta_guided_merging",
+      "sources": [
+        {
+          "type": "csv",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/AdaMerging/logs/adamerging_prefix/ind/metrics/adamerging_ind_class_il_continual_fold_metrics.csv",
+          "fold_column": "fold",
+          "metric_columns": {"mean_acc": "mean_acc"}
+        },
+        {
+          "type": "result_metric_log",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/AdaMerging/logs/adamerging/ind/result.log"
+        }
+      ]
+    },
+    {
+      "name": "AdaRank",
+      "family": "tta_guided_merging",
+      "sources": [
+        {
+          "type": "csv",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/AdaRank/logs/adarank_prefix/ind/metrics/adarank_ind_class_il_continual_fold_metrics.csv",
+          "fold_column": "fold",
+          "metric_columns": {"mean_acc": "mean_acc"}
+        },
+        {
+          "type": "result_metric_log",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/AdaRank/logs/adarank/ind_class_il/result.log"
+        }
+      ]
+    },
+    {
+      "name": "Hi-Vec",
+      "family": "tta_guided_merging",
+      "sources": [
+        {
+          "type": "csv",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/Hi-Vec/logs/hivec_prefix/ind/metrics/hivec_ind_class_il_continual_fold_metrics.csv",
+          "fold_column": "fold",
+          "metric_columns": {"mean_acc": "mean_acc"}
+        },
+        {
+          "type": "result_metric_log",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/Hi-Vec/logs/hivec/ind_class_il/result.log"
+        }
+      ]
+    },
+    {
+      "name": "MINGLE",
+      "family": "tta_guided_merging",
+      "sources": [
+        {
+          "type": "csv",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MINGLE/logs/mingle_prefix/ind/metrics/mingle_ind_class_il_continual_fold_metrics.csv",
+          "fold_column": "fold",
+          "metric_columns": {"mean_acc": "mean_acc"}
+        },
+        {
+          "type": "summary_log",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/MINGLE/logs/mingle_prefix/ind/task_5_class_il/result.log"
+        }
+      ]
+    },
+    {
+      "name": "Subspace Fusion",
+      "family": "tta_guided_merging",
+      "sources": [
+        {
+          "type": "csv",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/subspace_fusion/logs/concrete_prefix/ind/metrics/concrete_ind_class_il_continual_fold_metrics.csv",
+          "fold_column": "fold",
+          "metric_columns": {"mean_acc": "mean_acc"}
+        },
+        {
+          "type": "summary_log",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/subspace_fusion/logs/concrete_prefix/ind/task_5_class_il/ind/eval/class_il/result.log"
+        }
+      ]
+    },
+    {
+      "name": "TCube",
+      "family": "tta_guided_merging",
+      "sources": [
+        {
+          "type": "csv",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/TCube/logs/t3_prefix/ind/metrics/tcube_ind_class_il_continual_fold_metrics.csv",
+          "fold_column": "fold",
+          "metric_columns": {"mean_acc": "mean_acc"}
+        },
+        {
+          "type": "summary_log",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/TCube/logs/t3_prefix/ind/task_5_class_il/result.log"
+        }
+      ]
+    },
+    {
+      "name": "Weight-Ensembling MoE",
+      "family": "tta_guided_merging",
+      "sources": [
+        {
+          "type": "csv",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/weight-ensembling_MoE/logs/wemoe_prefix/ind/metrics/wemoe_ind_class_il_continual_fold_metrics.csv",
+          "fold_column": "fold",
+          "metric_columns": {"mean_acc": "mean_acc"}
+        },
+        {
+          "type": "summary_log",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/weight-ensembling_MoE/logs/wemoe_prefix/ind/task_5_class_il_resume/result.log"
+        }
+      ]
+    },
+    {
+      "name": "EWC Online",
+      "family": "regularization",
+      "sources": [
+        {
+          "type": "csv",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/models/ewc_online/logs/ind/lambda_1e-3_gamma_0.9_fisher_0_k400/eval/results_class_il.csv",
+          "fold_column": "fold",
+          "metric_columns": {"bacc": "bacc", "mean_acc": "mean_acc", "macro_f1": "macro_f1"}
+        }
+      ]
+    },
+    {
+      "name": "LwF",
+      "family": "regularization",
+      "sources": [
+        {
+          "type": "csv",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/models/lwf/logs/ind/alpha_0.5_temp_2.0_k400/eval/results_class_il.csv",
+          "fold_column": "fold",
+          "metric_columns": {"bacc": "bacc", "mean_acc": "mean_acc", "macro_f1": "macro_f1"}
+        }
+      ]
+    },
+    {
+      "name": "DER++ (buffer 10)",
+      "family": "rehearsal",
+      "sources": [
+        {
+          "type": "csv",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/models/derpp/logs/ind/buffer_10_k400/eval/results_class_il.csv",
+          "fold_column": "fold",
+          "metric_columns": {"bacc": "bacc", "mean_acc": "mean_acc", "macro_f1": "macro_f1"}
+        }
+      ]
+    },
+    {
+      "name": "DER++ (buffer 30)",
+      "family": "rehearsal",
+      "sources": [
+        {
+          "type": "csv",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/models/derpp/logs/ind/buffer_30_k400/eval/results_class_il.csv",
+          "fold_column": "fold",
+          "metric_columns": {"bacc": "bacc", "mean_acc": "mean_acc", "macro_f1": "macro_f1"}
+        }
+      ]
+    },
+    {
+      "name": "A-GEM (buffer 10)",
+      "family": "rehearsal",
+      "sources": [
+        {
+          "type": "csv",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/models/agem/logs/ind/buffer_10_k400/train_eval/results_class_il.csv",
+          "fold_column": "fold",
+          "metric_columns": {"bacc": "bacc", "mean_acc": "mean_acc", "macro_f1": "macro_f1"}
+        }
+      ]
+    },
+    {
+      "name": "A-GEM (buffer 30)",
+      "family": "rehearsal",
+      "sources": [
+        {
+          "type": "csv",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/models/agem/logs/ind/buffer_30_k400/train_eval/results_class_il.csv",
+          "fold_column": "fold",
+          "metric_columns": {"bacc": "bacc", "mean_acc": "mean_acc", "macro_f1": "macro_f1"}
+        }
+      ]
+    },
+    {
+      "name": "ER-ACE (buffer 10)",
+      "family": "rehearsal",
+      "sources": [
+        {
+          "type": "csv",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/models/er_ace/logs/ind/buffer_10_k400/train_eval/results_class_il.csv",
+          "fold_column": "fold",
+          "metric_columns": {"bacc": "bacc", "mean_acc": "mean_acc", "macro_f1": "macro_f1"}
+        }
+      ]
+    },
+    {
+      "name": "ER-ACE (buffer 30)",
+      "family": "rehearsal",
+      "sources": [
+        {
+          "type": "csv",
+          "path": "/mmlab_students/storageStudents/nguyenvd/Thanhld/WSI/models/er_ace/logs/ind/buffer_30_k400/train_eval/results_class_il.csv",
+          "fold_column": "fold",
+          "metric_columns": {"bacc": "bacc", "mean_acc": "mean_acc", "macro_f1": "macro_f1"}
+        }
+      ]
+    }
+  ]
+}
