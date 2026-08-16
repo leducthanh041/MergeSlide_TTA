@@ -100,6 +100,28 @@ checkpoints_nfs_backup_*/
 docs/
 docs_old/
 
+# Local package retained for backward compatibility
+/mergeslide_tta/
+
+# MergeSlide baseline evaluation retained locally
+/test_classIL_task_prompt.py
+/test_classIL_task_prompt_other_metrics.py
+/test_taskIL.py
+/scripts/test_classIL.sh
+/scripts/test_classIL_other_metrics.sh
+/scripts/test_taskIL.sh
+
+# Research-only ablations, tuning, diagnostics, and visualization
+/scripts/*ablation*.sh
+/scripts/*nsteps*.sh
+/scripts/random_search*.sh
+/scripts/collect_*.sh
+/scripts/nvidia-smi.sh
+/tools/plot/
+/tools/statistical_significance/
+/tools/random_search*.py
+/tools/summarize_*.py
+
 # ---------------------------------------------------------------------------
 # One-off local maintenance scripts
 # ---------------------------------------------------------------------------

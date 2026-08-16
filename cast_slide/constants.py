@@ -3,7 +3,7 @@ Shared constants used across training, merging, and evaluation.
 All task-specific configurations are defined here once.
 """
 
-# Total number of sequential tasks (TCGA cohorts)
+# Total number of sequential tasks in the active forward sequence.
 NUM_TASKS: int = 6
 
 # Number of classes per task
@@ -46,11 +46,13 @@ TASK_TO_GLOBAL_CLASS: dict[int, dict[int, int]] = {
 }
 
 # Task names for logging
-TASK_NAMES: list[str] = ["BRCA", "RCC", "NSCLC", "ESCA", "TGCT", "CESC"]
+TASK_NAMES: list[str] = [
+    "BRCA", "RCC", "NSCLC", "ESCA", "TGCT", "CESC",
+]
 
 
 # ---------------------------------------------------------------------------
-# FORWARD aliases — rõ ràng hơn khi dùng cùng REVERSE
+# Forward-order aliases used alongside reverse-order constants.
 # ---------------------------------------------------------------------------
 
 TASK_NAMES_FORWARD:           list[str]                 = TASK_NAMES
@@ -58,7 +60,7 @@ NUM_CLASSES_FORWARD:          list[int]                 = NUM_CLASSES
 TASK_CLASS_RANGES_FORWARD:    dict[int, list[int]]      = TASK_CLASS_RANGES
 TASK_TO_GLOBAL_CLASS_FORWARD: dict[int, dict[int, int]] = TASK_TO_GLOBAL_CLASS
 
-# prompt_classifier luôn build theo FORWARD — dùng để init MLP weights trong build_model()
+# The prompt classifier is always built in forward order for MLP initialization.
 CLASSIFIER_CLASS_RANGES_FORWARD: dict[int, list[int]] = TASK_CLASS_RANGES_FORWARD
 
 
@@ -88,24 +90,22 @@ TASK_TO_GLOBAL_CLASS_REVERSE: dict[int, dict[int, int]] = {
     5: {0: 11, 1: 12},
 }
 
-
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
 
 def get_order_constants(order: str = "forward") -> tuple:
     """
-    Trả về (task_names, num_classes, task_class_ranges, task_to_global_class)
-    theo order được chỉ định.
+    Return task metadata for the requested task order.
 
     Args:
-        order: "forward" (B→R→N→E→T→C) hoặc "reverse" (C→T→E→N→R→B).
+        order: "forward" (B->R->N->E->T->C) or "reverse" (C->T->E->N->R->B).
 
     Returns:
-        Tuple gồm 4 constants tương ứng.
+        Tuple of task names, class counts, class ranges, and class mappings.
 
     Raises:
-        ValueError: Nếu order không hợp lệ.
+        ValueError: If order is not supported.
     """
     if order == "forward":
         return (

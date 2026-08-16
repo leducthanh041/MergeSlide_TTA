@@ -127,7 +127,7 @@ def rcc_prompts():
             'renal cell carcinoma, chromophobe type',
             'renal cell carcinoma of the chromophobe type',
             'chromophobe rcc',
-            'chromophobe renal cell carcinoma, which is a rare type of kidney cancer that forms in the cells lining the small tubules in the kidney. These small tubules help filter waste from the blood, making urine.'
+            #'chromophobe renal cell carcinoma, which is a rare type of kidney cancer that forms in the cells lining the small tubules in the kidney. These small tubules help filter waste from the blood, making urine.'
         ]
             ]
 

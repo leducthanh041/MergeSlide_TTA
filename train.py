@@ -15,11 +15,11 @@ from omegaconf import OmegaConf
 from sklearn.metrics import balanced_accuracy_score
 from tqdm import tqdm
 
-from mergeslide_tta.constants import NUM_TASKS, NUM_CLASSES, TASK_CLASS_RANGES, K_PATCHES, TITAN_PS_ARG, TASK_NAMES
-from mergeslide_tta.checkpoint_mirror import save_checkpoint_with_mirror
-from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
-from mergeslide_tta.model import build_model, build_prompt_classifier, cosine_lr, EarlyStopping
-from mergeslide_tta.utils import seed_torch
+from cast_slide.constants import NUM_TASKS, NUM_CLASSES, TASK_CLASS_RANGES, K_PATCHES, TITAN_PS_ARG, TASK_NAMES
+from cast_slide.checkpoint_mirror import save_checkpoint_with_mirror
+from cast_slide.datasets import Sequential_Generic_MIL_Dataset
+from cast_slide.model import build_model, build_prompt_classifier, cosine_lr, EarlyStopping
+from cast_slide.utils import seed_torch
 
 
 def format_bytes(num_bytes: int) -> str:
@@ -166,6 +166,9 @@ if __name__ == "__main__":
                         help="Override checkpoints path from config")
     parser.add_argument("--fold_start", type=int, default=0)
     parser.add_argument("--fold_end",   type=int, default=10)
+    parser.add_argument("--task_start", type=int, default=0)
+    parser.add_argument("--task_end", type=int, default=None,
+                        help="Exclusive task end; defaults to all configured tasks")
     args = parser.parse_args()  # ← parse ONCE, outside fold loop
 
     cfg    = OmegaConf.load(args.config)
@@ -175,22 +178,28 @@ if __name__ == "__main__":
 
     save_dir = args.save_dir or cfg.paths.finetuned_checkpoints
 
+    seq_dataset = Sequential_Generic_MIL_Dataset(cfg)
+    num_tasks = len(seq_dataset.datasets)
+    task_end = args.task_end if args.task_end is not None else num_tasks
+    if not 0 <= args.task_start < task_end <= num_tasks:
+        raise ValueError(
+            f"Invalid task range [{args.task_start}, {task_end}) "
+            f"for {num_tasks} configured tasks"
+        )
+
     # Build prompt classifier ONCE (expensive — loads TITAN text encoder)
     print("Building prompt classifier ...")
     classifier, _ = build_prompt_classifier(str(device))
     print_gpu_vram("after_prompt_classifier", device)
-
-    seq_dataset = Sequential_Generic_MIL_Dataset(cfg)
+    print(
+        f"[INFO] configured_tasks={num_tasks} "
+        f"training_task_range=[{args.task_start}, {task_end})"
+    )
 
     for fold_id in range(args.fold_start, args.fold_end):
         print(f"\n{'='*50}\nFold {fold_id}\n{'='*50}")
 
-        for task_id in range(NUM_TASKS):   # ← FIX: range(NUM_TASKS) không phải range(3)
-            task_names = (
-                list(reversed(TASK_NAMES))
-                if getattr(cfg.dataset, 'order', 'forward') == 'reverse'
-                else TASK_NAMES
-            )
+        for task_id in range(args.task_start, task_end):
             print(f"\n--- Task {task_id} ({seq_dataset.task_names[task_id]}) ---")
             print_gpu_vram(f"before_task_{task_id}", device)
             train_loader, val_loader, _ = seq_dataset.get_data_loaders(fold_id, task_id)
