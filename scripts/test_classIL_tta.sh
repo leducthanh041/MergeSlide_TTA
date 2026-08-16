@@ -84,7 +84,6 @@ CLASSIL_ENTRYPOINT="${CLASSIL_ENTRYPOINT:-tools/run_classil_with_pt_features.py}
 TTA_ENTRYPOINT="${TTA_ENTRYPOINT:-test_classIL_tta.py}"
 TTA_VARIANTS="${TTA_VARIANTS:-$MODE}"
 
-# ---------------------------------------------------------------------------
 TTA_M="${TTA_M:-8}"                         # sub-bags/slide
 TTA_K_SUB="${TTA_K_SUB:-300}"               # patches/sub-bag
 TTA_TOP_RATIO="${TTA_TOP_RATIO:-0.5}"       # confident sub-bag ratio
@@ -95,8 +94,8 @@ TTA_N_STEPS="${TTA_N_STEPS:-5}"             # best continual setting from n_step
 TTA_PARAM_SCOPE="${TTA_PARAM_SCOPE:-ln_only}"  # ln_only | full
 TTA_ENTROPY_THRESHOLD="${TTA_ENTROPY_THRESHOLD:-0.4}"  # WSI-level filter
 TTA_GAMMA="${TTA_GAMMA:-0.5}"                  # JSD task-agreement weight
-TTA_SELECT_MODE="${TTA_SELECT_MODE:-intersection}"  # union | intersection
-TTA_USE_TASK_DIVERSITY="${TTA_USE_TASK_DIVERSITY:-0}" # 1 reproduces old bug
+TTA_SELECT_MODE="${TTA_SELECT_MODE:-intersection}"  # union | intersection | class_only | task_only
+TTA_USE_TASK_DIVERSITY="${TTA_USE_TASK_DIVERSITY:-0}"
 TTA_NO_TASK_AGREEMENT="${TTA_NO_TASK_AGREEMENT:-0}"   # 1 disables JSD agreement
 
 # Prompt embedding-space adaptation.
@@ -118,6 +117,7 @@ TTA_TAU_TASK="${TTA_TAU_TASK:-0.70}"        # TCP confidence fallback gate
 TTA_NAIVE_USE_TASK_ENTROPY="${TTA_NAIVE_USE_TASK_ENTROPY:-1}"
 TTA_USE_DAPC="${TTA_USE_DAPC:-1}"
 TTA_DAPC_LOSS_WEIGHT="${TTA_DAPC_LOSS_WEIGHT:-1.0}"
+TTA_CLASS_LOSS_WEIGHT="${TTA_CLASS_LOSS_WEIGHT:-1.0}"
 TTA_ENTROPY_LOSS_WEIGHT="${TTA_ENTROPY_LOSS_WEIGHT:-1.0}"
 if [ "$SETTING" = "ood" ]; then
     TTA_DAPC_TAU_ANCHOR="${TTA_DAPC_TAU_ANCHOR:-0.70}"
@@ -129,10 +129,9 @@ fi
 TTA_VERBOSE_LOSS="${TTA_VERBOSE_LOSS:-1}"
 TTA_DIAG_DIR="${TTA_DIAG_DIR:-}"
 TTA_RESULT_CSV="${TTA_RESULT_CSV:-}"
+TTA_EFFICIENCY_JSON="${TTA_EFFICIENCY_JSON:-}"
 
-# ---------------------------------------------------------------------------
-# Python binary  ging ht test_classIL.sh
-# ---------------------------------------------------------------------------
+# Python runtime
 if [ -z "${PYTHON_BIN:-}" ]; then
     DEFAULT_PYTHON="/mmlab_students/storageStudents/nguyenvd/anaconda3/envs/mergePre/bin/python3.10"
     if [ -x "$DEFAULT_PYTHON" ]; then
@@ -144,9 +143,7 @@ fi
 
 cd "$PROJECT_ROOT"
 
-# ---------------------------------------------------------------------------
-# Directory + symlink setup  ging ht test_classIL.sh
-# ---------------------------------------------------------------------------
+# Runtime directories
 mkdir -p "$MERGESLIDE_LOCAL_ROOT/logs" \
          "$MERGESLIDE_LOCAL_ROOT/checkpoints" \
          "$MERGESLIDE_LOCAL_ROOT/checkpoints_ood" \
@@ -170,9 +167,7 @@ export TMPDIR="${TMPDIR:-$MERGESLIDE_LOCAL_ROOT/tmp}"
 export SQLITE_TMPDIR="${SQLITE_TMPDIR:-$MERGESLIDE_LOCAL_ROOT/sqlite}"
 export HDF5_USE_FILE_LOCKING="${HDF5_USE_FILE_LOCKING:-FALSE}"
 
-# ---------------------------------------------------------------------------
-# Logging info
-# ---------------------------------------------------------------------------
+# Run summary
 TTA_EPISODIC="${TTA_EPISODIC:-0}"
 case "$TTA_EPISODIC" in
     0) RESET_LABEL="continual" ;;
@@ -197,10 +192,11 @@ echo "[INFO] config=$CONFIG_FORWARD"
 echo "[INFO] save_dir=$SAVE_DIR_FORWARD"
 echo "[INFO] merge_model_path=$MERGE_MODEL_PATH_FORWARD"
 echo "[INFO] tta_result_csv=$TTA_RESULT_CSV"
+echo "[INFO] tta_efficiency_json=$TTA_EFFICIENCY_JSON"
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-<unset>}"
 echo "[INFO] tta_variants=$TTA_VARIANTS"
 echo "[INFO] TTA M=$TTA_M | K_sub=$TTA_K_SUB | top_ratio=$TTA_TOP_RATIO | alpha=$TTA_ALPHA | regularizer=l2_anchor | l2_anchor_beta=$TTA_L2_ANCHOR_BETA | lr=$TTA_LR | n_steps=$TTA_N_STEPS | param_scope=$TTA_PARAM_SCOPE | entropy_threshold=$TTA_ENTROPY_THRESHOLD | tau_task=$TTA_TAU_TASK | naive_use_task_entropy=$TTA_NAIVE_USE_TASK_ENTROPY | reset=$RESET_LABEL | verbose_loss=$TTA_VERBOSE_LOSS"
-echo "[INFO] bugfix_ablation gamma=$TTA_GAMMA | select_mode=$TTA_SELECT_MODE | use_task_diversity=$TTA_USE_TASK_DIVERSITY | no_task_agreement=$TTA_NO_TASK_AGREEMENT"
+echo "[INFO] task_objective gamma=$TTA_GAMMA | select_mode=$TTA_SELECT_MODE | use_task_diversity=$TTA_USE_TASK_DIVERSITY | no_task_agreement=$TTA_NO_TASK_AGREEMENT"
 echo "[INFO] prompt_adapt no_teacher=$TTA_NO_TEACHER | ema_alpha=$TTA_EMA_ALPHA | no_adapt_prompts=$TTA_NO_ADAPT_PROMPTS | ema_alpha_prompt=$TTA_EMA_ALPHA_PROMPT | delta_margin=$TTA_DELTA_MARGIN | tp_anchor_beta=$TTA_TP_ANCHOR_BETA | gamma_margin=$TTA_GAMMA_MARGIN | no_reset_prompt_per_task=$TTA_NO_RESET_PROMPT_PER_TASK"
 echo "[INFO] dapc enabled=$TTA_USE_DAPC | weight=$TTA_DAPC_LOSS_WEIGHT | entropy_weight=$TTA_ENTROPY_LOSS_WEIGHT | tau_anchor=$TTA_DAPC_TAU_ANCHOR | beta=$TTA_DAPC_BETA"
 
@@ -214,9 +210,6 @@ supports_arg() {
     grep -q -- "$arg_name" "$entrypoint_path"
 }
 
-# ---------------------------------------------------------------------------
-# check_log_not_held  ging ht test_classIL.sh
-# ---------------------------------------------------------------------------
 check_log_not_held() {
     local log_path="$1"
     local resolved_log
@@ -238,9 +231,6 @@ check_log_not_held() {
     done
 }
 
-# ---------------------------------------------------------------------------
-# run_to_logs  ging ht test_classIL.sh
-# ---------------------------------------------------------------------------
 run_to_logs() {
     local result_log="$1"
     local error_log="$2"
@@ -316,6 +306,7 @@ build_variant_args() {
     --gamma_margin      "$gamma_margin"
     --tau_task          "$tau_task"
     --dapc_loss_weight  "$TTA_DAPC_LOSS_WEIGHT"
+    --class_loss_weight "$TTA_CLASS_LOSS_WEIGHT"
     --entropy_loss_weight "$TTA_ENTROPY_LOSS_WEIGHT"
     --dapc_tau_anchor   "$TTA_DAPC_TAU_ANCHOR"
     --dapc_beta         "$TTA_DAPC_BETA"
@@ -379,7 +370,13 @@ append_result_csv_arg() {
     fi
 }
 
-# ---------------------------------------------------------------------------
+append_efficiency_json_arg() {
+    if [ -n "$TTA_EFFICIENCY_JSON" ] && supports_arg "--efficiency_json"; then
+        echo "--efficiency_json"
+        echo "$TTA_EFFICIENCY_JSON"
+    fi
+}
+
 # Run selected Class-IL TTA mode on selected protocol.
 # Protocols:
 #   SETTING=ind ORDER=forward  -> B->R->N->E->T->C
@@ -387,7 +384,6 @@ append_result_csv_arg() {
 #   SETTING=ind ORDER=reverse  -> C->T->E->N->R->B
 # Modes:
 #   MODE=tcp | MODE=naive | MODE=all
-# ---------------------------------------------------------------------------
 
 if variant_enabled tcp; then
     build_variant_args tcp
@@ -400,7 +396,8 @@ if variant_enabled tcp; then
             --merge_model_path "$MERGE_MODEL_PATH_FORWARD" \
             --mode tcp \
             "${VARIANT_ARGS[@]}" \
-            $(append_result_csv_arg tcp)
+            $(append_result_csv_arg tcp) \
+            $(append_efficiency_json_arg)
 fi
 
 if variant_enabled naive; then
@@ -414,7 +411,8 @@ if variant_enabled naive; then
            --merge_model_path "$MERGE_MODEL_PATH_FORWARD" \
            --mode naive \
            "${VARIANT_ARGS[@]}" \
-           $(append_result_csv_arg naive)
+           $(append_result_csv_arg naive) \
+           $(append_efficiency_json_arg)
 fi
 
 echo "[INFO] finished at $(date)"

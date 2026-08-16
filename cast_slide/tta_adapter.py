@@ -1,22 +1,4 @@
-"""
-tta_adapter.py - MergeSlide_TTA core module.
-
-Pipeline per slide:
-  1. Quick no-grad forward -> compute entropy (WSI-level filter)
-  2. If entropy < threshold (IND slide) -> skip TTA, return directly
-  3. If entropy >= threshold (OOD slide) -> create M sub-bags -> forward
-     -> compute dual-level loss -> update selected backbone params -> re-infer
-
-Batch size = M = 8 sub-bags per slide, each sub-bag has K_sub = 300 patches.
-
-Modes:
-  tcp   -- TCP routing: t_hat from task_prompts -> class logits from task MLP
-  naive -- use all_class_embeddings [768, C_total] directly
-
-Param scopes:
-  ln_only -- update only LayerNorm weight/bias in the backbone
-  full    -- update all backbone parameters
-"""
+"""CAST-Slide test-time adaptation engine."""
 
 from copy import deepcopy
 from typing import Dict, List, Optional, Tuple
@@ -25,20 +7,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from mergeslide_tta.constants import TITAN_PS_ARG
-from mergeslide_tta.tta_losses import (
+from cast_slide.constants import TITAN_PS_ARG
+from cast_slide.tta_losses import (
     dual_level_tta_loss,
     entropy_loss,
     l2_anchor_loss,
-    select_confident_subbags,
-    select_confident_subbags_intersection,
+    select_confident_subbags_by_mode,
     task_margin_loss,
 )
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def collect_ln_params(model: nn.Module) -> Tuple[List[torch.Tensor], List[str]]:
     """Collect weight + bias of all nn.LayerNorm in model."""
@@ -89,32 +66,8 @@ def configure_backbone_for_tta(
     return backbone
 
 
-# ---------------------------------------------------------------------------
-# MergeSlide_TTA
-# ---------------------------------------------------------------------------
-
-class MergeSlide_TTA(nn.Module):
-    """
-    Test-Time Adaptation wrapper for MergeSlide.
-
-    Args:
-        backbone             : model.backbone (TITAN vision_encoder after merging)
-        task_prompts         : [T, 768] task-level prompt embeddings (frozen)
-        task_weights         : list of dict{'weight', 'bias'} MLP weights per task
-        num_classes          : list of int, classes per task
-        device               : torch.device
-        mode                 : 'tcp', 'naive', or 'task_il'
-        all_class_embeddings : [768, C_total] required when mode='naive'
-        M                    : sub-bags per slide = TTA batch size (default 8)
-        K_sub                : patches per sub-bag (default 300)
-        top_ratio            : confident sub-bag keep ratio (default 0.5)
-        alpha                : task-level loss weight (default 0.5)
-        l2_anchor_beta       : L2 regularizer weight toward merged source
-        lr                   : Adam learning rate (default 1e-4)
-        n_steps              : adapt steps per slide (default 1)
-        episodic             : reset LN params after each slide (default False = continual)
-        entropy_threshold    : only TTA when entropy >= threshold (default 0.4)
-    """
+class CASTSlide(nn.Module):
+    """Adapt a merged WSI encoder at test time."""
 
     def __init__(
         self,
@@ -153,6 +106,7 @@ class MergeSlide_TTA(nn.Module):
         naive_use_task_entropy: bool = True,
         use_dapc:             bool  = False,
         dapc_loss_weight:     float = 1.0,
+        class_loss_weight:    float = 1.0,
         entropy_loss_weight:  float = 1.0,
         dapc_tau_anchor:      float = 0.92,
         dapc_beta:            float = 1.2,
@@ -203,8 +157,8 @@ class MergeSlide_TTA(nn.Module):
             raise ValueError(
                 "Naive teacher inference requires use_teacher=True."
             )
-        if dapc_loss_weight < 0 or entropy_loss_weight < 0:
-            raise ValueError("DaPC and entropy loss weights must be non-negative.")
+        if dapc_loss_weight < 0 or class_loss_weight < 0 or entropy_loss_weight < 0:
+            raise ValueError("DaPC, class, and entropy loss weights must be non-negative.")
         if taskil_source_anchor_weight < 0:
             raise ValueError("Task-IL source anchor weight must be non-negative.")
         if not 0.0 <= dapc_tau_anchor <= 1.0:
@@ -276,7 +230,7 @@ class MergeSlide_TTA(nn.Module):
         self.use_task_agreement   = use_task_agreement
         self.gamma                = gamma
         self.select_mode          = select_mode
-        assert select_mode in ("union", "intersection", "class_only"), \
+        assert select_mode in ("union", "intersection", "class_only", "task_only"), \
             f"unsupported select_mode: {select_mode}"
         self.ps                   = torch.tensor(TITAN_PS_ARG).int().to(device)
 
@@ -291,22 +245,16 @@ class MergeSlide_TTA(nn.Module):
         self.gamma_margin         = gamma_margin
         self.use_dapc            = use_dapc
         self.dapc_loss_weight    = dapc_loss_weight
+        self.class_loss_weight   = class_loss_weight
         self.entropy_loss_weight = entropy_loss_weight
         self.dapc_tau_anchor     = dapc_tau_anchor
         self.dapc_beta           = dapc_beta
         self.taskil_source_anchor_weight = taskil_source_anchor_weight
 
-        # task_prompts becomes mutable (working copy) + frozen source anchor
         self.task_prompts_source = (
             self.task_prompts.detach().clone()
             if self.task_prompts is not None else None
         )
-        # self.task_prompts (set above) is now the *working* copy, updated
-        # in-place at Phase 5b if adapt_task_prompts=True.
-
-        # Mean-teacher: EMA copy of backbone, used for routing + final
-        # inference (PETAL/CoTTA-style: teacher is more stable than the
-        # backbone currently receiving gradient updates).
         if self.use_teacher:
             self.teacher = deepcopy(backbone).to(device)
             self.teacher.eval()
@@ -315,7 +263,6 @@ class MergeSlide_TTA(nn.Module):
         else:
             self.teacher = None
 
-        # DaPC and Task-IL source anchoring require an immutable source model.
         needs_anchor = self.use_dapc or (
             self.mode == "task_il" and self.taskil_source_anchor_weight > 0
         )
@@ -369,7 +316,7 @@ class MergeSlide_TTA(nn.Module):
         else:
             teacher_role = "disabled"
         config_log = (
-            f"[MergeSlide_TTA] {mode_info} | LN layers={num_ln} | "
+            f"[CAST-Slide] {mode_info} | LN layers={num_ln} | "
             f"param_scope={param_scope} | trainable_params={n_trainable:,}/{n_total:,} | "
             f"M={M} sub-bags | K_sub={K_sub} | "
             f"top_ratio={top_ratio} | "
@@ -409,9 +356,7 @@ class MergeSlide_TTA(nn.Module):
             )
         print(config_log)
 
-    # -----------------------------------------------------------------------
-    # Sub-bag creation
-    # -----------------------------------------------------------------------
+    # Module 1: Reliability-Gated Sub-Bag Selection
 
     def _make_subbags(
         self, features: torch.Tensor, coords: torch.Tensor,
@@ -425,10 +370,6 @@ class MergeSlide_TTA(nn.Module):
             coord_list.append(coords[idx])
         return feat_list, coord_list
 
-    # -----------------------------------------------------------------------
-    # Forward sub-bags
-    # -----------------------------------------------------------------------
-
     def _forward_subbags(
         self,
         feat_list:  List[torch.Tensor],
@@ -438,10 +379,6 @@ class MergeSlide_TTA(nn.Module):
         embeds = [self.backbone(f, c, self.ps)
                   for f, c in zip(feat_list, coord_list)]
         return torch.cat(embeds, dim=0)
-
-    # -----------------------------------------------------------------------
-    # Class logits by mode
-    # -----------------------------------------------------------------------
 
     def _class_logits_tcp(
         self, embeds: torch.Tensor, task_id: int
@@ -467,10 +404,6 @@ class MergeSlide_TTA(nn.Module):
         return self.l2_anchor_beta * l2_anchor_loss(
             self.adapt_params, self.adapt_params_anchor
         )
-
-    # -----------------------------------------------------------------------
-    # Teacher EMA
-    # -----------------------------------------------------------------------
 
     def _ema_update_teacher(self):
         """Update teacher = EMA(backbone). Called once per adapt step."""
@@ -513,6 +446,7 @@ class MergeSlide_TTA(nn.Module):
             logits = self._class_logits_tcp(embeds, task_id)
         return F.softmax(logits.float(), dim=-1)
 
+    # Module 2: Anchor-Verified Soft Target
     def _dapc_context(
         self,
         features: torch.Tensor,
@@ -539,9 +473,6 @@ class MergeSlide_TTA(nn.Module):
         teacher_original = self._prediction_from_embedding(z_teacher, task_id)
         anchor_conf = float(anchor_probs.max(dim=-1).values.item())
 
-        # The original teacher prediction is sufficient for a confident
-        # anchor. Delay the M expensive teacher-view forwards until DaPC
-        # actually needs the augmented-view average.
         teacher_average = teacher_original
         use_teacher_views = compute_teacher_views and (
             anchor_conf < self.dapc_tau_anchor
@@ -588,10 +519,6 @@ class MergeSlide_TTA(nn.Module):
             ),
         }
 
-    # -----------------------------------------------------------------------
-    # Task-prompt embedding-space adaptation
-    # -----------------------------------------------------------------------
-
     def _maybe_update_task_prompt(self, t_hat: int, z_teacher: torch.Tensor) -> bool:
         """
         Update task_prompts[t_hat] toward z_teacher IF the routing confidence
@@ -600,17 +527,15 @@ class MergeSlide_TTA(nn.Module):
         z_teacher : [1, 768] (or [N,768], will be mean-pooled) -- embedding
                     from the STABLE teacher, not the student being adapted.
 
-        Anchor step (tp_anchor_beta): after the EMA pull, blend back toward
-        task_prompts_source[t_hat] so a single task's prompt cannot drift
-        arbitrarily far over a long sequential test stream. beta=0 reproduces
-        the original tta_engine_v3.py behavior (no anchor).
+        After the EMA update, tp_anchor_beta pulls the prompt toward its
+        frozen source value to bound drift over a continual test stream.
         """
         if not self.adapt_task_prompts:
             return False
 
         with torch.no_grad():
-            z_mean = z_teacher.mean(dim=0, keepdim=True)          # [1, 768]
-            scores = F.softmax(z_mean @ self.task_prompts.T, dim=-1)  # [1, T]
+            z_mean = z_teacher.mean(dim=0, keepdim=True)
+            scores = F.softmax(z_mean @ self.task_prompts.T, dim=-1)
             top2   = scores.topk(2, dim=-1).values.squeeze(0)
             margin = (top2[0] - top2[1]).item()
 
@@ -621,7 +546,6 @@ class MergeSlide_TTA(nn.Module):
                 self.ema_alpha_prompt * self.task_prompts[t_hat]
                 + (1.0 - self.ema_alpha_prompt) * z_mean.squeeze(0)
             )
-            # Pull the working prompt back toward its source anchor.
             new_prompt = (
                 (1.0 - self.tp_anchor_beta) * target
                 + self.tp_anchor_beta * self.task_prompts_source[t_hat]
@@ -639,10 +563,7 @@ class MergeSlide_TTA(nn.Module):
             self.task_prompts.copy_(self.task_prompts_source)
         self.n_prompt_updates = {}
 
-    # -----------------------------------------------------------------------
-    # 1 adaptation step
-    # -----------------------------------------------------------------------
-
+    # Module 3: Stabilized Drift-Controlled Adaptation
     @torch.enable_grad()
     def _adapt_step(
         self,
@@ -652,7 +573,7 @@ class MergeSlide_TTA(nn.Module):
         taskil_source_target: Optional[torch.Tensor] = None,
     ) -> dict:
         feat_list, coord_list = self._make_subbags(features, coords)
-        embeds = self._forward_subbags(feat_list, coord_list)   # [M, 768]
+        embeds = self._forward_subbags(feat_list, coord_list)
         task_logits = (
             None
             if (
@@ -685,18 +606,12 @@ class MergeSlide_TTA(nn.Module):
             class_logits = self._class_logits_naive(embeds)
             tcp_reliable = True
 
-        if task_logits is None:
-            _, sel_idx = select_confident_subbags(
-                class_logits.detach(), self.top_ratio
-            )
-        elif self.select_mode == "intersection":
-            sel_idx = select_confident_subbags_intersection(
-                class_logits.detach(), task_logits.detach(), self.top_ratio
-            )
-        else:  # "union" -- v1 behavior, kept for ablation comparison
-            _, idx_class = select_confident_subbags(class_logits.detach(), self.top_ratio)
-            _, idx_task  = select_confident_subbags(task_logits.detach(),  self.top_ratio)
-            sel_idx      = torch.unique(torch.cat([idx_class, idx_task]))
+        sel_idx = select_confident_subbags_by_mode(
+            class_logits.detach(),
+            None if task_logits is None else task_logits.detach(),
+            self.top_ratio,
+            self.select_mode,
+        )
 
         if self.mode == "task_il":
             loss = entropy_loss(class_logits[sel_idx])
@@ -712,6 +627,7 @@ class MergeSlide_TTA(nn.Module):
                 class_logits[sel_idx],
                 None if task_logits is None else task_logits[sel_idx],
                 effective_alpha,
+                class_weight=self.class_loss_weight,
                 use_task_diversity=use_task_div,
                 use_task_agreement=use_task_agree,
                 gamma=self.gamma,
@@ -721,6 +637,7 @@ class MergeSlide_TTA(nn.Module):
                 class_logits[sel_idx],
                 task_logits[sel_idx],
                 self.alpha,
+                class_weight=self.class_loss_weight,
                 use_task_diversity=self.use_task_diversity,
                 use_task_agreement=self.use_task_agreement,
                 gamma=self.gamma,
@@ -741,8 +658,6 @@ class MergeSlide_TTA(nn.Module):
             source_anchor_loss = class_logits.new_zeros(())
         log["loss/taskil_source_anchor"] = source_anchor_loss.item()
         if self.mode == "naive" and self.naive_use_task_entropy:
-            # Match the original ablation: task entropy is diagnostic only
-            # (alpha remains zero), but task confidence guides view selection.
             log["loss/task_ent"] = entropy_loss(task_logits[sel_idx]).item()
 
         dapc_context = None
@@ -779,9 +694,6 @@ class MergeSlide_TTA(nn.Module):
         loss = loss + l2_reg
         log["loss/l2_anchor"] = l2_reg.item()
 
-        # Agreement pulls
-        # sub-bags to CONCUR on routing, margin pushes whichever task
-        # currently leads to lead by a clear gap.
         if self.mode == "tcp" and self.gamma_margin > 0:
             l_margin = task_margin_loss(embeds, self.task_prompts, margin=0.1)
             loss = loss + self.gamma_margin * l_margin
@@ -795,13 +707,8 @@ class MergeSlide_TTA(nn.Module):
         loss.backward()
         self.optimizer.step()
 
-        # Update the teacher and then the selected task prompt.
         self._ema_update_teacher()
         if self.mode == "tcp":
-            # Use the mean student embedding already computed this step as a
-            # cheap stand-in for a fresh teacher forward (saves 1 extra
-            # backbone pass per slide); teacher weights only just shifted by
-            # ema_alpha ~= 0.999 so the two are numerically close.
             prompt_updated = self._maybe_update_task_prompt(
                 t_hat, embeds.detach().float()
             )
@@ -809,10 +716,7 @@ class MergeSlide_TTA(nn.Module):
 
         return log
 
-    # -----------------------------------------------------------------------
-    # Quick inference (no grad)
-    # -----------------------------------------------------------------------
-
+    # Module 4: Confidence-Gated TCP Inference
     def _quick_inference(
         self, features: torch.Tensor, coords: torch.Tensor,
     ) -> Tuple[int, torch.Tensor, int, float]:
@@ -887,10 +791,6 @@ class MergeSlide_TTA(nn.Module):
 
         return pred_class, probs.cpu(), pred_task, entropy
 
-    # -----------------------------------------------------------------------
-    # Public: adapt + predict
-    # -----------------------------------------------------------------------
-
     def adapt_and_predict(
         self, features: torch.Tensor, coords: torch.Tensor,
     ) -> Tuple[int, torch.Tensor, int, dict]:
@@ -909,8 +809,6 @@ class MergeSlide_TTA(nn.Module):
             adapt_log  : dict
         """
         if self.episodic:
-            # Reset before the entropy gate so quick inference and adaptation
-            # both start from the same source state for every slide.
             self._reset()
 
         pred_class, probs, pred_task, entropy = self._quick_inference(
@@ -978,10 +876,6 @@ class MergeSlide_TTA(nn.Module):
         self.backbone.train()
         return pred_class, probs, pred_task, adapt_log
 
-    # -----------------------------------------------------------------------
-    # Reset
-    # -----------------------------------------------------------------------
-
     def _reset(self):
         self.backbone.load_state_dict(self._init_backbone, strict=True)
         self.optimizer.load_state_dict(self._init_optim)
@@ -996,10 +890,6 @@ class MergeSlide_TTA(nn.Module):
         self.n_adapted = 0
         self.n_skipped = 0
 
-
-# ---------------------------------------------------------------------------
-# Helper: load task MLP weights
-# ---------------------------------------------------------------------------
 
 def load_task_weights(
     task_model_paths: List[str],

@@ -15,11 +15,11 @@ from omegaconf import OmegaConf
 from sklearn.metrics import balanced_accuracy_score
 from tqdm import tqdm
 
-from mergeslide_tta.constants import NUM_TASKS, NUM_CLASSES, TASK_CLASS_RANGES, K_PATCHES, TITAN_PS_ARG, TASK_NAMES
-from mergeslide_tta.checkpoint_mirror import save_checkpoint_with_mirror
-from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
-from mergeslide_tta.model import build_model, build_prompt_classifier, cosine_lr, EarlyStopping
-from mergeslide_tta.utils import seed_torch
+from cast_slide.constants import NUM_TASKS, NUM_CLASSES, TASK_CLASS_RANGES, K_PATCHES, TITAN_PS_ARG, TASK_NAMES
+from cast_slide.checkpoint_mirror import save_checkpoint_with_mirror
+from cast_slide.datasets import Sequential_Generic_MIL_Dataset
+from cast_slide.model import build_model, build_prompt_classifier, cosine_lr, EarlyStopping
+from cast_slide.utils import seed_torch
 
 
 def format_bytes(num_bytes: int) -> str:

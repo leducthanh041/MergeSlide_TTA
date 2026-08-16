@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from transformers import AutoModel
 
-from mergeslide_tta.constants import EMBED_DIM, TITAN_PS_ARG
+from cast_slide.constants import EMBED_DIM, TITAN_PS_ARG
 
 
 class CustomSequential(nn.Module):
@@ -63,7 +63,7 @@ def build_prompt_classifier(device: str) -> tuple[torch.Tensor, list]:
     Returns (classifier_tensor [EMBED_DIM, 13], templates).
     Heavy operation — call once and reuse.
     """
-    from mergeslide_tta.prompts_zeroshot import (
+    from cast_slide.prompts_zeroshot import (
         brca_prompts, rcc_prompts, nsclc_prompts,
         esca_prompts, tgct_prompts, cesc_prompts,
     )

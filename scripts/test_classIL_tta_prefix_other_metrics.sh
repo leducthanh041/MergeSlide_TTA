@@ -4,7 +4,7 @@
 #
 # This matches test_classIL_task_prompt_other_metrics.py's prefix protocol:
 #   task_0.pt -> merged_task_1.pth -> ... -> merged_final.pth
-# but runs online MergeSlide_TTA during inference at every prefix.
+# Runs online CAST-Slide adaptation at every prefix.
 
 set -euo pipefail
 
@@ -111,6 +111,7 @@ TTA_TAU_TASK="${TTA_TAU_TASK:-0.70}"
 TTA_NAIVE_USE_TASK_ENTROPY="${TTA_NAIVE_USE_TASK_ENTROPY:-1}"
 TTA_USE_DAPC="${TTA_USE_DAPC:-1}"
 TTA_DAPC_LOSS_WEIGHT="${TTA_DAPC_LOSS_WEIGHT:-1.0}"
+TTA_CLASS_LOSS_WEIGHT="${TTA_CLASS_LOSS_WEIGHT:-1.0}"
 TTA_ENTROPY_LOSS_WEIGHT="${TTA_ENTROPY_LOSS_WEIGHT:-1.0}"
 if [ "$SETTING" = "ood" ]; then
     TTA_DAPC_TAU_ANCHOR="${TTA_DAPC_TAU_ANCHOR:-0.70}"
@@ -213,6 +214,7 @@ run_one_mode() {
         --gamma_margin "$TTA_GAMMA_MARGIN"
         --tau_task "$TTA_TAU_TASK"
         --dapc_loss_weight "$TTA_DAPC_LOSS_WEIGHT"
+        --class_loss_weight "$TTA_CLASS_LOSS_WEIGHT"
         --entropy_loss_weight "$TTA_ENTROPY_LOSS_WEIGHT"
         --dapc_tau_anchor "$TTA_DAPC_TAU_ANCHOR"
         --dapc_beta "$TTA_DAPC_BETA"

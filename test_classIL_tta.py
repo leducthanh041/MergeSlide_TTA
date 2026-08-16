@@ -1,8 +1,6 @@
-# test_classIL_tta.py
-"""
-Class-IL TTA evaluation -- mirrors test_classIL_task_prompt.py.
+"""CLASS-IL evaluation for CAST-Slide.
 
-Modes (same as original):
+Modes:
   tcp   (default): Task-to-Class Prompt-Aligned inference + TTA
   naive          : Direct class inference + TTA
 
@@ -43,16 +41,16 @@ from sklearn.metrics import (
 from tqdm import tqdm
 from transformers import AutoModel
 
-from mergeslide_tta.constants import K_PATCHES, NUM_TASKS
-from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
-from mergeslide_tta.metrics import pad_numpy_arrays
-from mergeslide_tta.task_prompt_io import load_task_prompts_for_tasks
-from mergeslide_tta.prompts_zeroshot import (
+from cast_slide.constants import K_PATCHES, NUM_TASKS
+from cast_slide.datasets import Sequential_Generic_MIL_Dataset
+from cast_slide.metrics import pad_numpy_arrays
+from cast_slide.task_prompt_io import load_task_prompts_for_tasks
+from cast_slide.prompts_zeroshot import (
     brca_prompts, rcc_prompts, nsclc_prompts,
     esca_prompts, tgct_prompts, cesc_prompts,
 )
-from mergeslide_tta.utils import get_eval_metrics, seed_torch
-from mergeslide_tta.tta_adapter import MergeSlide_TTA, load_task_weights
+from cast_slide.utils import get_eval_metrics, seed_torch
+from cast_slide.tta_adapter import CASTSlide, load_task_weights
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 HOT_DIR_NAMES = {"checkpoints", "logs", "sqlite"}
@@ -81,9 +79,7 @@ def safe_ovr_auc(targets, probabilities, class_id):
         return float("nan")
     return roc_auc_score(binary_targets, probabilities[:, class_id])
 
-# ---------------------------------------------------------------------------
-# Path helpers -- identical to test_classIL_task_prompt.py
-# ---------------------------------------------------------------------------
+# Path handling
 
 def get_local_hot_root() -> Path:
     user = os.environ.get("USER") or "thanhld"
@@ -131,9 +127,7 @@ def resolve_hot_path(path: str, local_root: Path) -> Path:
     return raw
 
 
-# ---------------------------------------------------------------------------
-# Build all_class_embeddings (naive mode only)
-# ---------------------------------------------------------------------------
+# Global classifier construction
 
 def build_class_embeddings(device, task_names: list) -> torch.Tensor:
     """[768, C_total] -- identical logic to test_classIL_task_prompt.py."""
@@ -160,14 +154,12 @@ def build_class_embeddings(device, task_names: list) -> torch.Tensor:
     return classifier.to(device)
 
 
-# ---------------------------------------------------------------------------
-# TTA inference loop for 1 task
-# ---------------------------------------------------------------------------
+# Per-task inference
 
 def eval_task_tta(
     test_loader,
     task_id:              int,
-    tta_model:            MergeSlide_TTA,
+    tta_model:            CASTSlide,
     task_to_global_class: dict,
     device,
     mode:                 str  = "tcp",
@@ -304,7 +296,7 @@ def eval_task_tta(
 def adapt_task_for_tcp_routing_tune(
     test_loader,
     task_id: int,
-    tta_model: MergeSlide_TTA,
+    tta_model: CASTSlide,
     device,
     measure_routing: bool,
 ) -> tuple[float, int, float]:
@@ -341,26 +333,22 @@ def adapt_task_for_tcp_routing_tune(
     return routing_acc, num_slides, elapsed_s
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
 if __name__ == "__main__":
     torch.multiprocessing.set_sharing_strategy("file_system")
 
     parser = argparse.ArgumentParser(description="Class-IL TTA evaluation")
 
-    # Paths (same as original)
+    # Paths
     parser.add_argument("--config",           type=str, default="configs/default.yaml")
     parser.add_argument("--save_dir",         type=str, required=True)
     parser.add_argument("--merge_model_path", type=str, required=True)
 
-    # Mode (same as original)
+    # Inference mode
     parser.add_argument("--mode", type=str, default="tcp",
                         choices=["tcp", "naive"],
                         help="tcp (default): TCP inference | naive: direct class inference")
 
-    # TTA hyperparams
+    # Adaptation parameters
     parser.add_argument("--M",                 type=int,   default=8)
     parser.add_argument("--K_sub",             type=int,   default=300)
     parser.add_argument("--top_ratio",         type=float, default=0.5)
@@ -383,7 +371,7 @@ if __name__ == "__main__":
         "--no_naive_task_entropy",
         dest="naive_use_task_entropy",
         action="store_false",
-        help="Ablation: use class-only confidence selection in naive mode.",
+        help="Use class-only confidence selection in naive mode.",
     )
     parser.set_defaults(naive_use_task_entropy=True)
     parser.add_argument("--lr",                type=float, default=1e-4)
@@ -397,24 +385,16 @@ if __name__ == "__main__":
     parser.add_argument("--episodic",          action="store_true",
                         help="Reset backbone, optimizer, teacher, and working "
                              "task prompts before every slide.")
-    # Loss and selection controls.
     parser.add_argument("--use_task_diversity", action="store_true",
-                        help="[ABLATION ONLY] Re-enable v1's buggy SHOT-style "
-                             "diversity on task-routing logits. Default OFF "
-                             "(the fixed, correct behavior). Only pass this "
-                             "flag to reproduce/compare against the old bug.")
+                        help="Enable task-distribution diversity.")
     parser.add_argument("--no_task_agreement",  action="store_true",
-                        help="Disable the new JSD task-agreement (CoTTA-style) "
+                        help="Disable JSD task agreement "
                              "term. Default: agreement term is ON.")
     parser.add_argument("--gamma",             type=float, default=0.5,
                         help="Weight of the JSD task-agreement term.")
     parser.add_argument("--select_mode",       type=str,   default="intersection",
-                        choices=["union", "intersection"],
-                        help="Confident sub-bag selection: v1 used 'union'. "
-                             "'intersection' (default) is stricter (EATA-style).")
-    # --------------------------------------------------------------------
-    # Prompt embedding-space adaptation.
-    # --------------------------------------------------------------------
+                        choices=["union", "intersection", "class_only", "task_only"],
+                        help="Confidence rule used to select sub-bags.")
     parser.add_argument("--no_teacher",        action="store_true",
                         help="Disable mean-teacher; route/infer with the "
                              "backbone being adapted directly.")
@@ -441,26 +421,19 @@ if __name__ == "__main__":
                         help="Confidence-gap gate for task-prompt update "
                              "(top1-top2 softmax score over task_prompts).")
     parser.add_argument("--tp_anchor_beta",    type=float, default=0.3,
-                        help="Anchor pull-back toward source task_prompts "
-                             "in [0,1]. 0 = original tta_engine_v3.py "
-                             "behavior (no anchor, unbounded drift). "
-                             "1 = prompts never move. Default 0.3.")
+                        help="Prompt pull-back toward the frozen source in [0,1].")
     parser.add_argument("--gamma_margin",      type=float, default=0.0,
                         help="Weight of task_margin_loss (0.0 = off).")
     parser.add_argument("--use_dapc", action="store_true",
                         help="Enable detached DaPC pseudo-label correction.")
     parser.add_argument("--dapc_loss_weight", type=float, default=1.0)
+    parser.add_argument("--class_loss_weight", type=float, default=1.0)
     parser.add_argument("--entropy_loss_weight", type=float, default=1.0,
-                        help="Weight of the existing entropy objective; use "
-                             "0 for the DaPC CE-only ablation.")
+                        help="Weight of the entropy objective.")
     parser.add_argument("--dapc_tau_anchor", type=float, default=0.92)
     parser.add_argument("--dapc_beta", type=float, default=1.2)
     parser.add_argument("--no_reset_prompt_per_task", action="store_true",
-                        help="Do NOT reset task_prompts to source between "
-                             "tasks. Default: reset per task (bounds "
-                             "cross-task drift). Pass this flag only for "
-                             "ablation / order-dependence stress-testing.")
-    # --------------------------------------------------------------------
+                        help="Keep adapted task prompts across task boundaries.")
     parser.add_argument("--verbose_loss",      action="store_true")
     parser.add_argument(
         "--result_csv",
@@ -537,7 +510,7 @@ if __name__ == "__main__":
             f"expected={NUM_TASKS}."
         )
 
-    # Load embeddings by mode (same logic as original)
+    # Class embeddings
     task_prompts = load_task_prompts_for_tasks(
         PROJECT_ROOT / "task_prompts.pt",
         seq_dataset.task_names,
@@ -599,7 +572,7 @@ if __name__ == "__main__":
         ]
         task_weights = load_task_weights(task_model_paths, device)
 
-        tta_model = MergeSlide_TTA(
+        tta_model = CASTSlide(
             backbone             = base_model.vision_encoder,
             task_prompts         = task_prompts,
             task_weights         = task_weights,
@@ -634,6 +607,7 @@ if __name__ == "__main__":
             naive_use_task_entropy = args.naive_use_task_entropy,
             use_dapc             = args.use_dapc,
             dapc_loss_weight     = args.dapc_loss_weight,
+            class_loss_weight    = args.class_loss_weight,
             entropy_loss_weight  = args.entropy_loss_weight,
             dapc_tau_anchor      = args.dapc_tau_anchor,
             dapc_beta            = args.dapc_beta,
@@ -841,6 +815,8 @@ if __name__ == "__main__":
                 "use_dapc": args.use_dapc,
                 "dapc_loss_weight": args.dapc_loss_weight,
                 "entropy_loss_weight": args.entropy_loss_weight,
+                "class_loss_weight": args.class_loss_weight,
+                "subbag_select_mode": args.select_mode,
                 **{
                     key.replace("/", "_"): loss_summary.get(key, float("nan"))
                     for key in (
@@ -970,7 +946,7 @@ if __name__ == "__main__":
             if device.type == "cuda" else 0.0
         )
         efficiency = {
-            "method": "MergeSlide_TTA",
+            "method": "CAST-Slide",
             "eval_setting": (
                 "tcp_tune_cesc_fold0"
                 if args.tcp_tune_cesc_fold0
@@ -1091,7 +1067,7 @@ if __name__ == "__main__":
         if device.type == "cuda" else 0.0
     )
     efficiency = {
-        "method": "MergeSlide_TTA",
+        "method": "CAST-Slide",
         "eval_setting": "class_il",
         "mode": args.mode,
         "param_scope": args.tta_param_scope,

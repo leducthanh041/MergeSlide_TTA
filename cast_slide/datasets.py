@@ -18,7 +18,7 @@ import h5py
 import torch.nn.functional as F
 import numpy as np
 from typing import Tuple
-from mergeslide_tta.constants import (
+from cast_slide.constants import (
     CLASSIFIER_CLASS_RANGES_FORWARD,
     get_order_constants,
 )

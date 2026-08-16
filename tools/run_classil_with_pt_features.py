@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Run an existing CLASS-IL entrypoint with PT-first feature loading.
-
-This wrapper leaves the original evaluation code untouched. It patches the
-dataset classes at runtime so feature tensors are read from pt_files when
-available, while coordinates still come from the existing H5 files.
-"""
+"""Run a WSI entrypoint with PT-first feature loading and H5 coordinates."""
 
 from __future__ import annotations
 
@@ -20,11 +15,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from mergeslide_tta.constants import TOTAL_CLASSES
+from cast_slide.constants import TOTAL_CLASSES
 
 
 DEFAULT_ENTRYPOINT = PROJECT_ROOT / "test_classIL_task_prompt.py"
 GLOBAL_CLASS_LABELS = list(range(TOTAL_CLASSES))
+PT_CACHE_DIR = os.environ.get("MERGESLIDE_PT_CACHE_DIR", "").strip()
+_REPORTED_CACHE_HITS = set()
 
 
 def _torch_load_cpu(path: str):
@@ -59,6 +56,18 @@ def _load_h5_coords_only(h5_path: str):
 
 
 def _load_features_pt_first(h5_path: str, pt_path: str, slide_id: str):
+    if PT_CACHE_DIR:
+        cached_path = os.path.join(PT_CACHE_DIR, os.path.basename(pt_path))
+        if os.path.isfile(cached_path):
+            pt_path = cached_path
+            if cached_path not in _REPORTED_CACHE_HITS:
+                print(
+                    f"[INFO] Using cached PT features: {cached_path}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                _REPORTED_CACHE_HITS.add(cached_path)
+
     if not os.path.exists(pt_path):
         return _load_h5_coords_and_features(h5_path, slide_id)
 
@@ -79,7 +88,7 @@ def _load_features_pt_first(h5_path: str, pt_path: str, slide_id: str):
 
 
 def _patch_datasets() -> None:
-    from mergeslide_tta import datasets as ds
+    from cast_slide import datasets as ds
 
     def generic_mil_getitem_pt_first(self, idx):
         slide_id = self.slide_data["slide_id"][idx]

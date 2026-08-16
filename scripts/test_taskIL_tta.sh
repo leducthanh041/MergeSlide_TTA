@@ -128,7 +128,7 @@ export HDF5_USE_FILE_LOCKING="${HDF5_USE_FILE_LOCKING:-FALSE}"
 
 RESET_LABEL="continual"
 if [ "${TTA_EPISODIC:-0}" = "1" ]; then
-    echo "[WARN] TTA_EPISODIC=1 is ignored. MergeSlide_TTA uses continual adaptation." >&2
+    echo "[WARN] TTA_EPISODIC=1 is ignored. CAST-Slide uses continual adaptation." >&2
 fi
 
 echo "[INFO] start at $(date)"

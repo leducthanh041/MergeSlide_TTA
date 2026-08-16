@@ -1,4 +1,4 @@
-# test_taskIL_tta.py
+"""TASK-IL evaluation for CAST-Slide."""
 """
 Task-IL TTA evaluation (upper bound with adaptation).
 
@@ -31,11 +31,11 @@ from sklearn.metrics import (
 from tqdm import tqdm
 from transformers import AutoModel
 
-from mergeslide_tta.constants import EMBED_DIM, K_PATCHES, NUM_TASKS, TITAN_PS_ARG
-from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
-from mergeslide_tta.metrics import pad_numpy_arrays
-from mergeslide_tta.utils import get_eval_metrics, seed_torch
-from mergeslide_tta.tta_adapter import MergeSlide_TTA, load_task_weights
+from cast_slide.constants import EMBED_DIM, K_PATCHES, NUM_TASKS, TITAN_PS_ARG
+from cast_slide.datasets import Sequential_Generic_MIL_Dataset
+from cast_slide.metrics import pad_numpy_arrays
+from cast_slide.utils import get_eval_metrics, seed_torch
+from cast_slide.tta_adapter import CASTSlide, load_task_weights
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 HOT_DIR_NAMES = {"checkpoints", "logs", "sqlite"}
@@ -105,7 +105,7 @@ def resolve_hot_path(path: str, local_root: Path) -> Path:
 def eval_task_taskil_tta(
     test_loader,
     task_id:     int,
-    tta_model:   MergeSlide_TTA,
+    tta_model:   CASTSlide,
     device,
     verbose_loss: bool = False,
 ) -> tuple:
@@ -177,7 +177,7 @@ if __name__ == "__main__":
     parser.add_argument("--config",           type=str, default="configs/default.yaml")
     parser.add_argument("--save_dir",         type=str, required=True)
     parser.add_argument("--merge_model_path", type=str, required=True)
-    # TTA hyperparams
+    # Adaptation parameters
     parser.add_argument("--M",                 type=int,   default=8)
     parser.add_argument("--K_sub",             type=int,   default=300)
     parser.add_argument("--top_ratio",         type=float, default=0.5)
@@ -197,7 +197,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--episodic",
         action="store_true",
-        help="[Deprecated/Ignored] MergeSlide_TTA uses continual adaptation.",
+        help="[Deprecated/Ignored] CAST-Slide uses continual adaptation.",
     )
     parser.add_argument("--verbose_loss",      action="store_true")
     parser.add_argument(
@@ -267,8 +267,7 @@ if __name__ == "__main__":
         acc_per_task = {}
 
         for task_id in range(num_tasks):
-            # Build TTA model with fixed_task_id for this task
-            tta_model = MergeSlide_TTA(
+            tta_model = CASTSlide(
                 backbone          = base_model.vision_encoder,
                 task_prompts      = None,
                 task_weights      = task_weights,
@@ -404,7 +403,7 @@ if __name__ == "__main__":
         if device.type == "cuda" else 0.0
     )
     efficiency = {
-        "method": "MergeSlide_TTA",
+        "method": "CAST-Slide",
         "eval_setting": "task_il",
         "mode": "task_il",
         "param_scope": args.tta_param_scope,

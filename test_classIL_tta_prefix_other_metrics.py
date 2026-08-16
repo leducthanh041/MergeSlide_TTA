@@ -30,11 +30,11 @@ from sklearn.metrics import balanced_accuracy_score
 from tqdm import tqdm
 from transformers import AutoModel
 
-from mergeslide_tta.constants import K_PATCHES
-from mergeslide_tta.datasets import Sequential_Generic_MIL_Dataset
-from mergeslide_tta.metrics import backward_transfer, forgetting, pad_numpy_arrays
-from mergeslide_tta.tta_adapter import MergeSlide_TTA, load_task_weights
-from mergeslide_tta.utils import get_eval_metrics, seed_torch
+from cast_slide.constants import K_PATCHES
+from cast_slide.datasets import Sequential_Generic_MIL_Dataset
+from cast_slide.metrics import backward_transfer, forgetting, pad_numpy_arrays
+from cast_slide.tta_adapter import CASTSlide, load_task_weights
+from cast_slide.utils import get_eval_metrics, seed_torch
 
 from test_classIL_tta import (
     PROJECT_ROOT,
@@ -175,7 +175,7 @@ def _run_task_with_tta(
     test_loader,
     task_id: int,
     num_seen_tasks: int,
-    tta_model: MergeSlide_TTA,
+    tta_model: CASTSlide,
     task_to_global_class: dict,
     device: torch.device,
     mode: str,
@@ -225,8 +225,7 @@ def _run_task_with_tta(
         if mode == "tcp":
             routing_correct += int(pred_task == task_id)
 
-            # This intentionally matches test_classIL_tta.py and the original
-            # TCP metric code: per-task metrics use local labels.
+            # Per-task metrics use local labels.
             preds_all.append(np.array([pred_class]))
             probs_all.append(probs_np)
             targets_all.append(label.numpy())
@@ -356,7 +355,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--select_mode",
         type=str,
         default="intersection",
-        choices=["union", "intersection"],
+        choices=["union", "intersection", "class_only", "task_only"],
     )
     parser.add_argument("--no_teacher", action="store_true")
     parser.add_argument(
@@ -389,6 +388,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(naive_use_task_entropy=True)
     parser.add_argument("--use_dapc", action="store_true")
     parser.add_argument("--dapc_loss_weight", type=float, default=1.0)
+    parser.add_argument("--class_loss_weight", type=float, default=1.0)
     parser.add_argument("--entropy_loss_weight", type=float, default=1.0)
     parser.add_argument("--dapc_tau_anchor", type=float, default=0.92)
     parser.add_argument("--dapc_beta", type=float, default=1.2)
@@ -506,7 +506,7 @@ def main() -> None:
             adapt_task_prompts = (not args.no_adapt_prompts) and seq_task >= 2
             gamma_margin = args.gamma_margin if seq_task >= 2 else 0.0
 
-            tta_model = MergeSlide_TTA(
+            tta_model = CASTSlide(
                 backbone=base_model.vision_encoder,
                 task_prompts=task_prompts,
                 task_weights=task_weights,
@@ -541,6 +541,7 @@ def main() -> None:
                 naive_use_task_entropy=args.naive_use_task_entropy,
                 use_dapc=args.use_dapc,
                 dapc_loss_weight=args.dapc_loss_weight,
+                class_loss_weight=args.class_loss_weight,
                 entropy_loss_weight=args.entropy_loss_weight,
                 dapc_tau_anchor=args.dapc_tau_anchor,
                 dapc_beta=args.dapc_beta,

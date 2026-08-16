@@ -1,6 +1,4 @@
-"""
-tta_losses.py - Loss functions for MergeSlide_TTA.
-"""
+"""Losses and reliability selection for CAST-Slide."""
 
 import torch
 import torch.nn.functional as F
@@ -28,17 +26,15 @@ def task_agreement_loss(task_logits: torch.Tensor) -> torch.Tensor:
     Jensen-Shannon-Divergence based agreement loss across M sub-bags.
 
     All M sub-bags come from the SAME slide -> should agree on task routing.
-    Minimizing this loss pulls the M routing distributions together
-    (CoTTA-style consistency), which is the correct inductive bias here --
-    the opposite of SHOT's diversity term.
+    Minimizing this loss pulls the routing distributions of the sub-bags
+    toward a consistent task decision.
 
     task_logits: [M, T]
     Returns a scalar in [0, log 2] (JSD upper bound), 0 = perfect agreement.
     """
-    probs = F.softmax(task_logits, dim=1).clamp(min=1e-8)   # [M, T]
-    mean_probs = probs.mean(dim=0, keepdim=True).clamp(min=1e-8)  # [1, T]
-    # mean KL(p_i || mean_p) over the M sub-bags = JSD-like agreement measure
-    kl = (probs * (probs.log() - mean_probs.log())).sum(dim=1)  # [M]
+    probs = F.softmax(task_logits, dim=1).clamp(min=1e-8)
+    mean_probs = probs.mean(dim=0, keepdim=True).clamp(min=1e-8)
+    kl = (probs * (probs.log() - mean_probs.log())).sum(dim=1)
     return kl.mean()
 
 
@@ -46,6 +42,7 @@ def dual_level_tta_loss(
     class_logits:        torch.Tensor,
     task_logits:         Optional[torch.Tensor],
     alpha:                float = 0.5,
+    class_weight:         float = 1.0,
     use_task_diversity:   bool  = False,
     use_task_agreement:   bool  = True,
     gamma:                float = 0.5,
@@ -54,18 +51,16 @@ def dual_level_tta_loss(
     Combined class-level and task-level objective.
 
     L_class = H_class_ent
-    L_task  = H_task_ent  [- H_task_div]             (kept for ablation, OFF by default)
-              [+ gamma * JSD_agreement]
+    L_task  = H_task_ent [- H_task_div] + gamma * JSD_agreement
 
-    total = L_class + alpha * L_task
+    total = class_weight * L_class + alpha * L_task
 
     Args:
         class_logits        : [N, C_task] (tcp) or [N, C_total] (naive)
         task_logits          : [N, T], or None when task branch is disabled
         alpha                : task loss weight (0 disables the task branch)
-        use_task_diversity   : SHOT diversity on task logits (INVALID for this setting,
-                                default False -- this was the v1 bug; only expose for
-                                ablation comparison, do not enable in production runs)
+        class_weight         : class loss weight (0 disables the class branch)
+        use_task_diversity   : optional diversity term on task logits
         use_task_agreement   : JSD consistency across sub-bags' task routing
         gamma                : weight of the agreement term relative to l_task_ent
     """
@@ -91,10 +86,11 @@ def dual_level_tta_loss(
         )
         l_task = l_task_ent - l_task_div + gamma * l_task_agree
 
-    total = l_class + alpha * l_task
+    total = class_weight * l_class + alpha * l_task
 
     log = {
         "loss/class_ent":    l_class_ent.item(),
+        "loss/class_weighted": (class_weight * l_class).item(),
         "loss/task_ent":     l_task_ent.item(),
         "loss/task_div":     l_task_div.item() if use_task_diversity else 0.0,
         "loss/task_agree":   l_task_agree.item() if use_task_agreement else 0.0,
@@ -150,9 +146,31 @@ def select_confident_subbags_intersection(
     set_task  = set(idx_task.tolist())
     inter = sorted(set_class & set_task)
     if len(inter) == 0:
-        # fallback: single most-confident sub-bag by class entropy
         inter = [int(idx_class[0].item())]
     return torch.tensor(inter, dtype=torch.long, device=class_logits.device)
+
+
+def select_confident_subbags_by_mode(
+    class_logits: torch.Tensor,
+    task_logits: Optional[torch.Tensor],
+    top_ratio: float,
+    mode: str,
+) -> torch.Tensor:
+    if mode == "task_only" and task_logits is None:
+        raise RuntimeError("task_only selection requires task logits")
+    if task_logits is None or mode == "class_only":
+        return select_confident_subbags(class_logits, top_ratio)[1]
+    if mode == "task_only":
+        return select_confident_subbags(task_logits, top_ratio)[1]
+    if mode == "intersection":
+        return select_confident_subbags_intersection(
+            class_logits, task_logits, top_ratio
+        )
+    if mode == "union":
+        idx_class = select_confident_subbags(class_logits, top_ratio)[1]
+        idx_task = select_confident_subbags(task_logits, top_ratio)[1]
+        return torch.unique(torch.cat([idx_class, idx_task]))
+    raise ValueError(f"unsupported selection mode: {mode}")
 
 
 def task_margin_loss(
@@ -177,8 +195,8 @@ def task_margin_loss(
 
     Returns 0 when the gap already exceeds `margin` for a given sub-bag.
     """
-    scores = embeds.float() @ task_prompts.detach().T          # [N, T]
-    top2   = scores.topk(2, dim=-1).values                     # [N, 2]
+    scores = embeds.float() @ task_prompts.detach().T
+    top2 = scores.topk(2, dim=-1).values
     return F.relu(top2[:, 1] - top2[:, 0] + margin).mean()
 
 
