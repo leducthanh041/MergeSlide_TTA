@@ -1,4 +1,4 @@
-# CAST-Slide
+# CAST-Slide: Continual Model Merging with Confidence-Aligned Soft-Target Adaptation on Whole-Slide Images Analysis
 
 CAST-Slide is a test-time adaptation framework for continual whole-slide image classification. It adapts a continually merged TITAN slide encoder without source data while controlling noisy sub-bags, pseudo-target errors, representation drift, and uncertain task routing.
 
